@@ -13,6 +13,7 @@
 #include "Sgp41/Sgp41.h"
 #include "Sht/Sht.h"
 #include "Main/utils.h"
+#include "Fidas200/Fidas200Sensor.h"
 
 #ifndef GIT_VERSION
 #define GIT_VERSION "3.1.9-snap"
