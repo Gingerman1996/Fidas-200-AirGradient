@@ -59,7 +59,6 @@ The following modifications were made to adapt the code for use with the Fidas 2
    ```cpp
    Fidas200Sensor fidasSensor(&Serial0);
    ```
-   f
 4. **Changes to `setup` and `loop` Functions:**
    - In the `setup` function, the sensor is initialized:
    ```cpp
