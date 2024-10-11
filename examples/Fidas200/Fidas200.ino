@@ -39,6 +39,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include <HardwareSerial.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_now.h>
 
 #include "AgApiClient.h"
 #include "AgConfigure.h"
@@ -128,6 +129,35 @@ AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS,
 AgSchedule FidasSchedule(SENSOR_PM_UPDATE_INTERVAL, updateFidas);
 
 Fidas200Sensor fidasSensor(&Serial0);
+
+// Define the structure for the message
+typedef struct struct_message {
+  char message[32];  // Incoming message
+  float pm25;        // PM2.5 value
+} struct_message;
+
+struct_message myData;
+
+// Callback function when data is received
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  memcpy(&myData, incomingData, sizeof(myData));
+  if (strcmp(myData.message, "GetFidasData") ==
+      0) {  // Check if the message is "GetFidasData"
+    Serial.println("Received 'GetFidasData' request");
+
+    // Prepare the response data
+    strcpy(myData.message, "FidasDataResponse");
+    myData.pm25 = fidasSensor.getPM25();  // Example PM2.5 value
+
+    // Send the response back to the Sender
+    esp_err_t result = esp_now_send(mac, (uint8_t *)&myData, sizeof(myData));
+    if (result == ESP_OK) {
+      Serial.println("Response sent successfully");
+    } else {
+      Serial.println("Failed to send response");
+    }
+  }
+}
 
 void setup() {
   /** Serial for print debug message */
@@ -264,6 +294,15 @@ void setup() {
 
   // Update display and led bar after finishing setup to show dashboard
   updateDisplayAndLedBar();
+
+  // Initialize ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW initialization failed");
+    return;
+  }
+
+  // Register the callback for receiving data
+  esp_now_register_recv_cb(onDataRecv);
 }
 
 void loop() {
@@ -1207,5 +1246,6 @@ static void updateFidas(void) {
   measurements.pm25_1 = fidasSensor.getPM25();
 
   Serial.printf("Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³\n",
-                measurements.Temperature, measurements.Humidity, measurements.pm25_1);
+                measurements.Temperature, measurements.Humidity,
+                measurements.pm25_1);
 }

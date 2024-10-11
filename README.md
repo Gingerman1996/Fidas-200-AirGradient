@@ -8,8 +8,8 @@ This project is a fork of the [AirGradient Arduino](https://github.com/airgradie
 
 The project utilizes the following hardware components:
 - **I-9PSL Board**: The main controller used to interface with the Fidas 200. For more details, refer to the [I-9PSL board documentation](https://www.airgradient.com/documentation/one-v9/#schematics).
-- **Fidas 200**: An air quality monitoring device capable of measuring PM2.5, temperature, and humidity. The connection to the Fidas 200 is made using the plug for the PMS, which includes a serial port.
-- **RS232 to TTL Module**: Used for converting the RS232 signal from the Fidas 200 to TTL levels that the I-9PSL board can read.
+- **Fidas 200**: An air quality monitoring device capable of measuring PM2.5, temperature, and humidity. The connection to the Fidas 200 is made using the plug for the PMS, which includes a serial port. For more details, refer to the [Fidas 200 product page](https://www.palas.de/en/product/fidas200?save=accept&cookie[sessiontracking]=1).
+- **RS232 to TTL Module**: Used for converting the RS232 signal from the Fidas 200 to TTL levels that the I-9PSL board can read. For more information, see the [RS232 to TTL module details](https://www.allnewstep.com/product/4929/%E0%B9%82%E0%B8%A1%E0%B8%94%E0%B8%B9%E0%B8%A5%E0%B9%81%E0%B8%9B%E0%B8%A5%E0%B8%87%E0%B8%AA%E0%B8%B1%E0%B8%8D%E0%B8%8D%E0%B8%B2%E0%B8%93-rs232-%E0%B9%80%E0%B8%9B%E0%B9%87%E0%B8%99-ttl-uart-module-rs232-sp3232-ttl-to-rs232).
 
 ## Purpose
 
