@@ -1,47 +1,79 @@
-AirGradient Arduino Library for ESP8266 (Wemos D1 MINI) and ESP32 (ESP32-C3 Mini)
-=====================================================================================================
+# Air Quality Measurement Project with Fidas 200
 
-This is the code for the AirGradient open-source indoor and outdoor air quality monitors with ESP8266 / ESP32-C3 Microcontrollers.
+## Overview
 
-More information on the air quality monitors and kits are available here:
-Indoor Monitor: [https://www.airgradient.com/indoor/](https://www.airgradient.com/indoor/)
-Outdoor Monitor: [https://www.airgradient.com/outdoor/](https://www.airgradient.com/outdoor/)
+This project is a fork of the [AirGradient Arduino](https://github.com/airgradienthq/arduino) repository, an open-source initiative developed by AirGradient. The purpose of this project is to use the I-9PSL board to read data from the Fidas 200 air quality measurement device. The data is read via a serial port and transmitted to the AirGradient dashboard. The parameters measured include PM2.5, Temperature, and Humidity.
 
-This library supports the following sensor modules:
-- Plantower PMS5003
-- Plantower PMS5003T
-- SenseAir S8
-- Sensirion SGP41
-- Sensirion SHT40
+## Hardware Used
 
-## Important information
+The project utilizes the following hardware components:
+- **I-9PSL Board**: The main controller used to interface with the Fidas 200. For more details, refer to the [I-9PSL board documentation](https://www.airgradient.com/documentation/one-v9/#schematics).
+- **Fidas 200**: An air quality monitoring device capable of measuring PM2.5, temperature, and humidity. The connection to the Fidas 200 is made using the plug for the PMS, which includes a serial port.
+- **RS232 to TTL Module**: Used for converting the RS232 signal from the Fidas 200 to TTL levels that the I-9PSL board can read.
 
-Make sure you have exactly the versions of libraries and boards installed as described in the comment section of the example files.
+## Purpose
 
-If you have an older version of the AirGradient PCB not mentioned in the example files, please downgrade this library to version 2.4.15 to support these legacy boards.
+The main goal of this project is to implement a system that can:
+1. **Read data from the Fidas 200**: The I-9PSL board communicates with the Fidas 200 via the serial port, using an RS232 to TTL converter to interface between the devices.
+2. **Transmit data to AirGradient dashboard**: Once the data (PM2.5, temperature, and humidity) is read from the Fidas 200, it is sent to the AirGradient dashboard for monitoring and visualization.
 
-## Help & Support
+## How It Works
 
-If you have any questions or problems, check out [our forum](https://forum.airgradient.com/). 
+1. The I-9PSL board connects to the Fidas 200 using a serial connection via the RS232 to TTL module. The connection is made through the plug for the PMS, which provides access to the serial port.
+2. The board continuously reads the air quality data (PM2.5), temperature, and humidity values from the Fidas 200.
+3. The measured data is transmitted to the AirGradient dashboard for display and analysis.
 
-## Documentation
+## Code Modifications
 
-Local server API documentation is available in [/docs/local-server.md](/docs/local-server.md) and AirGradient server API on [https://api.airgradient.com/public/docs/api/v1/](https://api.airgradient.com/public/docs/api/v1/).
+The following modifications were made to adapt the code for use with the Fidas 200:
 
-## The following libraries have been integrated into this library for ease of use
+1. **Added Code for Reading Data from Fidas 200**:  
+   New files `Fidas200Sensor.h` and `Fidas200Sensor.cpp` were added under the `src/Fidas200` directory. These files contain the code necessary to interface with the Fidas 200 air quality sensor.
 
-- [Adafruit BusIO](https://github.com/adafruit/Adafruit_BusIO)
-- [Adafruit NeoPixel](https://github.com/adafruit/Adafruit_NeoPixel)
-- [Adafruit SH110X](https://github.com/adafruit/Adafruit_SH110X)
-- [Adafruit SSD1306 Wemos Mini OLED](https://github.com/stblassitude/Adafruit_SSD1306_Wemos_OLED)
-- [Adafruit GFX Library](https://github.com/adafruit/Adafruit-GFX-Library)
-- [Sensirion Gas Index Algorithm](https://github.com/Sensirion/arduino-gas-index-algorithm)
-- [Sensirion Core](https://github.com/Sensirion/arduino-core/)
-- [Sensirion I2C SGP41](https://github.com/Sensirion/arduino-i2c-sgp41)
-- [Sensirion I2C SHT](https://github.com/Sensirion/arduino-sht)
-- [WiFiManager](https://github.com/tzapu/WiFiManager)
-- [Arduino_JSON](https://github.com/arduino-libraries/Arduino_JSON)
-- [PubSubClient](https://github.com/knolleary/pubsubclient)
+2. **Modified the Example Code in `example/OneOpenAir`**:  
+   - Removed the initialization and data reading code for sensors originally used with the I-9PSL board, as these sensors are not used in this project.
+   - Added code to read data from the Fidas 200 instead.
 
-## License
-CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
+   Here is the added function for reading data from the Fidas 200:
+
+   ```cpp
+   static void updateFidas(void) {
+     fidasSensor.handle();
+
+     // Retrieve the values and print them
+     measurements.Temperature = fidasSensor.getTemperature();
+     measurements.Humidity = fidasSensor.getHumidity();
+     measurements.pm25_1 = fidasSensor.getPM25();
+
+     Serial.printf("Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³\n",
+                   measurements.Temperature, measurements.Humidity, measurements.pm25_1);
+   }
+   ```
+   The Fidas 200 sensor data is updated using the above function. The retrieved values for temperature, humidity, and PM2.5 are stored in the `measurements`structure.
+3. **Updated the Configuration for `OneOpenAir`:**
+   The schedule for reading the Fidas 200 data was configured using the `AgSchedule`:
+   ```cpp
+   AgSchedule FidasSchedule(SENSOR_PM_UPDATE_INTERVAL, updateFidas);
+   ```
+   - An instance of `Fidas200Sensor` was created using:
+   ```cpp
+   Fidas200Sensor fidasSensor(&Serial0);
+   ```
+   f
+4. **Changes to `setup` and `loop` Functions:**
+   - In the `setup` function, the sensor is initialized:
+   ```cpp
+   fidasSensor.begin(115200);
+   ```
+   - In the `loop` function, the schedule is run:
+   ```cpp
+   FidasSchedule.run();
+   ```
+5. **Modification to `AirGradient.h`:**
+   Added an include statement to import the Fidas 200 sensor header:
+   ```cpp
+   #include "Fidas200/Fidas200Sensor.h"
+   ```
+## Repository Origin
+
+This repository is a fork of the original [AirGradient Arduino repository](https://github.com/airgradienthq/arduino). The original project is maintained by AirGradient and provides open-source tools and libraries for air quality monitoring.
