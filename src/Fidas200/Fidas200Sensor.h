@@ -11,6 +11,8 @@ class Fidas200Sensor {
  private:
   HardwareSerial *serialPort;  // Serial port used for communication with the sensor
   bool waitingForResponse = false;  // Flag to check if waiting for a response from the sensor
+  int retryCount = 0;  // Counter for retry attempts
+  unsigned long lastSendTime = 0;  // Timestamp of the last command sent
 
   // Variables to store sensor data
   float temperature = 0.0;  // Temperature in °C

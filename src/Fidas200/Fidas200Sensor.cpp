@@ -84,10 +84,6 @@ void Fidas200Sensor::parseValues(const String &message) {
  * The command requests measurement values for temperature, humidity, and PM2.5.
  */
 void Fidas200Sensor::sendCommand() {
-  if (waitingForResponse) {
-    return;  // Do not send a new command if still waiting for a response
-  }
-
   char buffer[50] = "<getVal 40; 41; 58>";
 
   // Calculate BCC for the command data
@@ -98,6 +94,7 @@ void Fidas200Sensor::sendCommand() {
   serialPort->printf("%02X\r\n", bcc);  // Append BCC in hexadecimal format
 
   waitingForResponse = true;  // Set flag to indicate waiting for a response
+  lastSendTime = millis();  // Record the time of the last command sent
 }
 
 /**
@@ -112,6 +109,7 @@ void Fidas200Sensor::readResponse() {
     // Verify the BCC of the received response
     if (verifyBCC(response)) {
       parseValues(response);  // Parse and store the values if BCC is valid
+      retryCount = 0;  // Reset retry counter on successful response
     } else {
       sendCommand();  // Retry sending the command if BCC verification fails
     }
@@ -121,15 +119,28 @@ void Fidas200Sensor::readResponse() {
 /**
  * @brief Handles the communication with the sensor.
  * This function sends a request to the sensor and then waits for the response.
+ * If there is no response within 5 seconds, it retries sending the command.
  */
 void Fidas200Sensor::handle() {
-  // Send the command to the sensor
-  sendCommand();
-  
-  // Wait for a short period to allow the sensor to respond
-  delay(100);
+  // If waiting for a response, check if 5 seconds have passed since the last command was sent
+  if (waitingForResponse) {
+    if (millis() - lastSendTime >= 5000) {
+      // If 5 seconds have passed without a response, retry sending the command
+      retryCount++;
+      if (retryCount <= 3) {
+        sendCommand();  // Retry sending the command
+      } else {
+        // If retry limit is reached, reset the retry counter
+        retryCount = 0;
+        waitingForResponse = false;
+      }
+    }
+  } else {
+    // If not waiting for a response, send a new command
+    sendCommand();
+  }
 
-  // Read the response from the sensor
+  // Read the response if available
   readResponse();
 }
 
