@@ -47,6 +47,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "AgWiFiConnector.h"
 #include "AirGradient.h"
 #include "EEPROM.h"
+#include "ESPNowSender.h"
 #include "ESPmDNS.h"
 #include "LocalServer.h"
 #include "MqttClient.h"
@@ -96,6 +97,15 @@ static AgFirmwareMode fwMode = FW_MODE_I_9PSL;
 static bool ledBarButtonTest = false;
 static String fwNewVersion;
 
+// REPLACE WITH THE RECEIVER'S MAC Address
+uint8_t broadcastAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// Create a struct_message object
+struct_message myData;
+
+// Create ESPNowSender object
+ESPNowSender sender(broadcastAddress);
+
 static void boardInit(void);
 static void failedHandler(String msg);
 static void configurationUpdateSchedule(void);
@@ -115,28 +125,26 @@ static bool sgp41Init(void);
 static void firmwareCheckForUpdate(void);
 static void otaHandlerCallback(OtaState state, String mesasge);
 static void displayExecuteOta(OtaState state, String msg, int processing);
-static void updateFidas(void);
+static void sendPmViaESPNow(void);
 
 AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, updateDisplayAndLedBar);
 AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
                           configurationUpdateSchedule);
 AgSchedule agApiPostSchedule(SERVER_SYNC_INTERVAL, sendDataToServer);
 AgSchedule co2Schedule(SENSOR_CO2_UPDATE_INTERVAL, co2Update);
-// AgSchedule pmsSchedule(SENSOR_PM_UPDATE_INTERVAL, updatePm);
-// AgSchedule tempHumSchedule(SENSOR_TEMP_HUM_UPDATE_INTERVAL, tempHumUpdate);
-// AgSchedule tvocSchedule(SENSOR_TVOC_UPDATE_INTERVAL, updateTvoc);
+AgSchedule pmsSchedule(SENSOR_PM_UPDATE_INTERVAL, updatePm);
+AgSchedule tempHumSchedule(SENSOR_TEMP_HUM_UPDATE_INTERVAL, tempHumUpdate);
+AgSchedule tvocSchedule(SENSOR_TVOC_UPDATE_INTERVAL, updateTvoc);
 AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
 AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS,
                                   firmwareCheckForUpdate);
-AgSchedule FidasSchedule(SENSOR_PM_UPDATE_INTERVAL, updateFidas);
-
-Fidas200Sensor fidasSensor(&Serial0);
+AgSchedule sendESPNow(5000, sendPmViaESPNow);
 
 void setup() {
   /** Serial for print debug message */
   Serial.begin(115200);
   delay(100); /** For bester show log */
-  fidasSensor.begin(115200);
+
   /** Print device ID into log */
   Serial.println("Serial nr: " + ag->deviceId());
 
@@ -267,6 +275,12 @@ void setup() {
 
   // Update display and led bar after finishing setup to show dashboard
   updateDisplayAndLedBar();
+  // Begin ESP-NOW Sender
+  Serial.println("Begin ESP-NOW");
+  sender.begin();
+
+  // Set ESP serial number (MAC address as unique ID)
+  myData.id = ESP.getEfuseMac();
 }
 
 void loop() {
@@ -275,40 +289,37 @@ void loop() {
   configSchedule.run();
   agApiPostSchedule.run();
 
-  // if (configuration.hasSensorS8) {
-  //   co2Schedule.run();
-  // }
-  // if (configuration.hasSensorPMS1 || configuration.hasSensorPMS2) {
-  //   pmsSchedule.run();
-  // }
-  // if (ag->isOne()) {
-  //   if (configuration.hasSensorSHT) {
-  //     tempHumSchedule.run();
-  //   }
-  // }
-  // if (configuration.hasSensorSGP) {
-  //   tvocSchedule.run();
-  // }
-  if (ag->isOne()) {
-    // if (configuration.hasSensorPMS1) {
-    //   ag->pms5003.handle();
-    //   static bool pmsConnected = false;
-    //   if (pmsConnected != ag->pms5003.connected()) {
-    //     pmsConnected = ag->pms5003.connected();
-    //     Serial.printf("PMS sensor %s ", pmsConnected ? "connected" :
-    //     "removed");
-    //   }
-    // }
-  } else {
-    // if (configuration.hasSensorPMS1) {
-    //   ag->pms5003t_1.handle();
-    // }
-    // if (configuration.hasSensorPMS2) {
-    //   ag->pms5003t_2.handle();
-    // }
+  if (configuration.hasSensorS8) {
+    co2Schedule.run();
   }
-
-  FidasSchedule.run();
+  if (configuration.hasSensorPMS1 || configuration.hasSensorPMS2) {
+    pmsSchedule.run();
+  }
+  if (ag->isOne()) {
+    if (configuration.hasSensorSHT) {
+      tempHumSchedule.run();
+    }
+  }
+  if (configuration.hasSensorSGP) {
+    tvocSchedule.run();
+  }
+  if (ag->isOne()) {
+    if (configuration.hasSensorPMS1) {
+      ag->pms5003.handle();
+      static bool pmsConnected = false;
+      if (pmsConnected != ag->pms5003.connected()) {
+        pmsConnected = ag->pms5003.connected();
+        Serial.printf("PMS sensor %s ", pmsConnected ? "connected" : "removed");
+      }
+    }
+  } else {
+    if (configuration.hasSensorPMS1) {
+      ag->pms5003t_1.handle();
+    }
+    if (configuration.hasSensorPMS2) {
+      ag->pms5003t_2.handle();
+    }
+  }
 
   watchdogFeedSchedule.run();
 
@@ -323,6 +334,7 @@ void loop() {
 
   /** Firmware check for update handle */
   checkForUpdateSchedule.run();
+  sendESPNow.run();
 }
 
 static void co2Update(void) {
@@ -660,7 +672,7 @@ void dispSensorNotFound(String ss) {
 }
 
 static void oneIndoorInit(void) {
-  // configuration.hasSensorPMS2 = false;
+  configuration.hasSensorPMS2 = false;
 
   /** Display init */
   oledDisplay.begin();
@@ -712,31 +724,31 @@ static void oneIndoorInit(void) {
   oledDisplay.setText("Monitor", "initializing...", "");
 
   /** Init sensor SGP41 */
-  // if (sgp41Init() == false) {
-  //   dispSensorNotFound("SGP41");
-  // }
+  if (sgp41Init() == false) {
+    dispSensorNotFound("SGP41");
+  }
 
-  // /** INit SHT */
-  // if (ag->sht.begin(Wire) == false) {
-  //   Serial.println("SHTx sensor not found");
-  //   configuration.hasSensorSHT = false;
-  //   dispSensorNotFound("SHT");
-  // }
+  /** INit SHT */
+  if (ag->sht.begin(Wire) == false) {
+    Serial.println("SHTx sensor not found");
+    configuration.hasSensorSHT = false;
+    dispSensorNotFound("SHT");
+  }
 
-  // /** Init S8 CO2 sensor */
-  // if (ag->s8.begin(Serial1) == false) {
-  //   Serial.println("CO2 S8 sensor not found");
-  //   configuration.hasSensorS8 = false;
-  //   dispSensorNotFound("S8");
-  // }
+  /** Init S8 CO2 sensor */
+  if (ag->s8.begin(Serial1) == false) {
+    Serial.println("CO2 S8 sensor not found");
+    configuration.hasSensorS8 = false;
+    dispSensorNotFound("S8");
+  }
 
-  // /** Init PMS5003 */
-  // if (ag->pms5003.begin(Serial0) == false) {
-  //   Serial.println("PMS sensor not found");
-  //   configuration.hasSensorPMS1 = false;
+  /** Init PMS5003 */
+  if (ag->pms5003.begin(Serial0) == false) {
+    Serial.println("PMS sensor not found");
+    configuration.hasSensorPMS1 = false;
 
-  //   dispSensorNotFound("PMS");
-  // }
+    dispSensorNotFound("PMS");
+  }
 }
 static void openAirInit(void) {
   configuration.hasSensorSHT = false;
@@ -838,12 +850,12 @@ static void openAirInit(void) {
     }
   }
 
-  // /** update the PMS poll period base on fw mode and sensor available */
-  // if (fwMode != FW_MODE_O_1PST) {
-  //   if (configuration.hasSensorPMS1 && configuration.hasSensorPMS2) {
-  //     pmsSchedule.setPeriod(2000);
-  //   }
-  // }
+  /** update the PMS poll period base on fw mode and sensor available */
+  if (fwMode != FW_MODE_O_1PST) {
+    if (configuration.hasSensorPMS1 && configuration.hasSensorPMS2) {
+      pmsSchedule.setPeriod(2000);
+    }
+  }
   Serial.printf("Firmware Mode: %s\r\n", AgFirmwareModeName(fwMode));
 }
 
@@ -855,13 +867,13 @@ static void boardInit(void) {
   }
 
   /** Set S8 CO2 abc days period */
-  // if (configuration.hasSensorS8) {
-  //   if (ag->s8.setAbcPeriod(configuration.getCO2CalibrationAbcDays() * 24)) {
-  //     Serial.println("Set S8 AbcDays successful");
-  //   } else {
-  //     Serial.println("Set S8 AbcDays failure");
-  //   }
-  // }
+  if (configuration.hasSensorS8) {
+    if (ag->s8.setAbcPeriod(configuration.getCO2CalibrationAbcDays() * 24)) {
+      Serial.println("Set S8 AbcDays successful");
+    } else {
+      Serial.println("Set S8 AbcDays failure");
+    }
+  }
 
   localServer.setFwMode(fwMode);
 }
@@ -1276,14 +1288,12 @@ static void tempHumUpdate(void) {
   }
 }
 
-static void updateFidas(void) {
-  fidasSensor.handle();
+static void sendPmViaESPNow(void) {
+  // Set values to send
+  myData.pm25 = measurements.pm25_1;       // Example PM2.5 data
+  myData.temp = measurements.Temperature;  // Example Humidity data
+  myData.humi = measurements.Humidity;     // Example Temperature data
 
-  // Retrieve the values and print them
-  measurements.Temperature = fidasSensor.getTemperature();
-  measurements.Humidity = fidasSensor.getHumidity();
-  measurements.pm25_1 = fidasSensor.getPM25();
-
-  Serial.printf("Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³\n",
-                measurements.Temperature, measurements.Humidity, measurements.pm25_1);
+  // Send the data
+  sender.sendData(myData);
 }
