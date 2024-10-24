@@ -87,6 +87,7 @@ void Fidas200Sensor::parseValues(const String &message) {
 
   // Extract the data within < >
   String data = message.substring(start + 1, end);
+  Serial.println(data);
   int tempIndex = data.indexOf("40=");
   int humidityIndex = data.indexOf("41=");
   int pm25Index = data.indexOf("58=");
@@ -94,7 +95,10 @@ void Fidas200Sensor::parseValues(const String &message) {
   int pm10Index = data.indexOf("59=");
   int pmPCountIndex = data.indexOf("60=");
 
-  if (tempIndex == -1 || humidityIndex == -1 || pm25Index == -1) {
+  Serial.println();
+
+  if (tempIndex == -1 || humidityIndex == -1 || pm25Index == -1 ||
+          pm1Index == -1 || pm10Index == -1 || pmPCountIndex == -1) {
     return;  // Exit if any expected values are missing
   }
 

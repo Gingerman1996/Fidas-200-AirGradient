@@ -1250,7 +1250,7 @@ static void updateFidas(void) {
 
   Serial.printf(
       "Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³, PM1: %d µg/m³, "
-      "PM10: %d µg/m³, Particle Count: %.2f\n",
+      "PM10: %d µg/m³, Particle Count: %.d\n",
       measurements.Temperature, measurements.Humidity, measurements.pm25_1,
       measurements.pm01_1, measurements.pm10_1, measurements.pm03PCount_1);
 }
