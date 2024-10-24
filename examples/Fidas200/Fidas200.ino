@@ -1244,8 +1244,13 @@ static void updateFidas(void) {
   measurements.Temperature = fidasSensor.getTemperature();
   measurements.Humidity = fidasSensor.getHumidity();
   measurements.pm25_1 = fidasSensor.getPM25();
+  measurements.pm01_1 = fidasSensor.getPM1();
+  measurements.pm10_1 = fidasSensor.getPM10();
+  measurements.pm03PCount_1 = fidasSensor.getPCount();
 
-  Serial.printf("Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³\n",
-                measurements.Temperature, measurements.Humidity,
-                measurements.pm25_1);
+  Serial.printf(
+      "Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³, PM1: %d µg/m³, "
+      "PM10: %d µg/m³, Particle Count: %.2f\n",
+      measurements.Temperature, measurements.Humidity, measurements.pm25_1,
+      measurements.pm01_1, measurements.pm10_1, measurements.pm03PCount_1);
 }
