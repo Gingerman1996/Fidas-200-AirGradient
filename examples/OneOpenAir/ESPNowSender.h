@@ -4,19 +4,21 @@
 #include <esp_now.h>
 #include <WiFi.h>
 
-// Structure to send data
-typedef struct struct_message {
+// Struct to store data to be sent
+typedef struct ESPNow_message {
     uint64_t id;   // Serial number of ESP (MAC address)
     float pm25;    // PM2.5 value
     float humi;    // Humidity value
     float temp;    // Temperature value
-} struct_message;
+} ESPNow_message;
 
 class ESPNowSender {
 public:
     ESPNowSender(const uint8_t broadcastAddress[6]);
     void begin();
-    void sendData(struct_message myData);
+    bool sendData(ESPNow_message myData);
+    bool addBroadcastPeer(int *channel);
+    bool ensureWiFiConnected(const char* ssid);
     
 private:
     uint8_t _broadcastAddress[6];

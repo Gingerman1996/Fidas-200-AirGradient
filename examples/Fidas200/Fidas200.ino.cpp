@@ -1,72 +1,40 @@
-/*
-This is the combined firmware code for AirGradient ONE and AirGradient Open Air
-open-source hardware Air Quality Monitor with ESP32-C3 Microcontroller.
-
-It is an air quality monitor for PM2.5, CO2, TVOCs, NOx, Temperature and
-Humidity with a small display, an RGB led bar and can send data over Wifi.
-
-Open source air quality monitors and kits are available:
-Indoor Monitor: https://www.airgradient.com/indoor/
-Outdoor Monitor: https://www.airgradient.com/outdoor/
-
-Build Instructions: AirGradient ONE:
-https://www.airgradient.com/documentation/one-v9/ Build Instructions:
-AirGradient Open Air:
-https://www.airgradient.com/documentation/open-air-pst-kit-1-3/
-
-Please make sure you have esp32 board manager installed. Tested with
-version 2.0.11.
-
-Important flashing settings:
-- Set board to "ESP32C3 Dev Module"
-- Enable "USB CDC On Boot"
-- Flash frequency "80Mhz"
-- Flash mode "QIO"
-- Flash size "4MB"
-- Partition scheme "Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)"
-- JTAG adapter "Disabled"
-
-Configuration parameters, e.g. Celsius / Fahrenheit or PM unit (US AQI vs ug/m3)
-can be set through the AirGradient dashboard.
-
-If you have any questions please visit our forum at
-https://forum.airgradient.com/
-
-CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
-
-*/
-
+# 1 "C:\\Users\\santa\\AppData\\Local\\Temp\\tmpfdubjr17"
+#include <Arduino.h>
+# 1 "C:/Users/santa/OneDrive/Dokumen/AirGradient/Git/Fidas-200-AirGradient/examples/Fidas200/Fidas200.ino"
+# 39 "C:/Users/santa/OneDrive/Dokumen/AirGradient/Git/Fidas-200-AirGradient/examples/Fidas200/Fidas200.ino"
 #include <HardwareSerial.h>
-#include "AirGradient.h"
-#include "OtaHandler.h"
+#include <WebServer.h>
+#include <WiFi.h>
+#include <esp_now.h>
+
 #include "AgApiClient.h"
 #include "AgConfigure.h"
 #include "AgSchedule.h"
 #include "AgStateMachine.h"
 #include "AgWiFiConnector.h"
+#include "AirGradient.h"
 #include "EEPROM.h"
 #include "ESPmDNS.h"
 #include "LocalServer.h"
 #include "MqttClient.h"
 #include "OpenMetrics.h"
+#include "OtaHandler.h"
 #include "WebServer.h"
-#include <WebServer.h>
-#include <WiFi.h>
 
-#define LED_BAR_ANIMATION_PERIOD 100         /** ms */
-#define DISP_UPDATE_INTERVAL 2500            /** ms */
-#define SERVER_CONFIG_SYNC_INTERVAL 60000    /** ms */
-#define SERVER_SYNC_INTERVAL 60000           /** ms */
-#define MQTT_SYNC_INTERVAL 60000             /** ms */
-#define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5     /** sec */
-#define SENSOR_TVOC_UPDATE_INTERVAL 1000     /** ms */
-#define SENSOR_CO2_UPDATE_INTERVAL 4000      /** ms */
-#define SENSOR_PM_UPDATE_INTERVAL 2000       /** ms */
-#define SENSOR_TEMP_HUM_UPDATE_INTERVAL 2000 /** ms */
-#define DISPLAY_DELAY_SHOW_CONTENT_MS 2000   /** ms */
-#define FIRMWARE_CHECK_FOR_UPDATE_MS (60*60*1000)   /** ms */
+#define LED_BAR_ANIMATION_PERIOD 100
+#define DISP_UPDATE_INTERVAL 2500
+#define SERVER_CONFIG_SYNC_INTERVAL 60000
+#define SERVER_SYNC_INTERVAL 60000
+#define MQTT_SYNC_INTERVAL 60000
+#define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5
+#define SENSOR_TVOC_UPDATE_INTERVAL 1000
+#define SENSOR_CO2_UPDATE_INTERVAL 4000
+#define SENSOR_PM_UPDATE_INTERVAL 2000
+#define SENSOR_TEMP_HUM_UPDATE_INTERVAL 2000
+#define DISPLAY_DELAY_SHOW_CONTENT_MS 2000
+#define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000)
 
-/** I2C define */
+
 #define I2C_SDA_PIN 7
 #define I2C_SCL_PIN 6
 #define OLED_I2C_ADDR 0x3C
@@ -113,37 +81,74 @@ static void ledBarEnabledUpdate(void);
 static bool sgp41Init(void);
 static void firmwareCheckForUpdate(void);
 static void otaHandlerCallback(OtaState state, String mesasge);
-static void displayExecuteOta(OtaState state, String msg,
-                              int processing);
+static void displayExecuteOta(OtaState state, String msg, int processing);
+static void updateFidas(void);
 
 AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, updateDisplayAndLedBar);
 AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
                           configurationUpdateSchedule);
 AgSchedule agApiPostSchedule(SERVER_SYNC_INTERVAL, sendDataToServer);
 AgSchedule co2Schedule(SENSOR_CO2_UPDATE_INTERVAL, co2Update);
-AgSchedule pmsSchedule(SENSOR_PM_UPDATE_INTERVAL, updatePm);
-AgSchedule tempHumSchedule(SENSOR_TEMP_HUM_UPDATE_INTERVAL, tempHumUpdate);
-AgSchedule tvocSchedule(SENSOR_TVOC_UPDATE_INTERVAL, updateTvoc);
 AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
-AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS, firmwareCheckForUpdate);
+AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS,
+                                  firmwareCheckForUpdate);
+AgSchedule FidasSchedule(SENSOR_PM_UPDATE_INTERVAL, updateFidas);
+
+Fidas200Sensor fidasSensor(&Serial0);
+
+
+typedef struct struct_message {
+  char message[32];
+  float pm25;
+} struct_message;
+
+struct_message myData;
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len);
+void setup();
+void loop();
+static void sendDataToAg();
+void dispSensorNotFound(String ss);
+static void oneIndoorInit(void);
+static void openAirInit(void);
+static void configUpdateHandle();
+#line 142 "C:/Users/santa/OneDrive/Dokumen/AirGradient/Git/Fidas-200-AirGradient/examples/Fidas200/Fidas200.ino"
+void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  memcpy(&myData, incomingData, sizeof(myData));
+  if (strcmp(myData.message, "GetFidasData") ==
+      0) {
+    Serial.println("Received 'GetFidasData' request");
+
+
+    strcpy(myData.message, "FidasDataResponse");
+    myData.pm25 = fidasSensor.getPM25();
+
+
+    esp_err_t result = esp_now_send(mac, (uint8_t *)&myData, sizeof(myData));
+    if (result == ESP_OK) {
+      Serial.println("Response sent successfully");
+    } else {
+      Serial.println("Failed to send response");
+    }
+  }
+}
 
 void setup() {
-  /** Serial for print debug message */
-  Serial.begin(115200);
-  delay(100); /** For bester show log */
 
-  /** Print device ID into log */
+  Serial.begin(115200);
+  delay(100);
+  fidasSensor.begin(115200);
+
   Serial.println("Serial nr: " + ag->deviceId());
 
-  /** Initialize local configure */
+
   configuration.begin();
 
-  /** Init I2C */
+
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   delay(1000);
 
-  /** Detect board type: ONE_INDOOR has OLED display, Scan the I2C address to
-   * identify board type */
+
+
   Wire.beginTransmission(OLED_I2C_ADDR);
   if (Wire.endTransmission() == 0x00) {
     ag = new AirGradient(BoardType::ONE_INDOOR);
@@ -160,17 +165,17 @@ void setup() {
   openMetrics.setAirGradient(ag);
   localServer.setAirGraident(ag);
 
-  /** Example set custom API root URL */
-  // apiClient.setApiRoot("https://example.custom.api");
 
-  /** Init sensor */
+
+
+
   boardInit();
 
-  /** Connecting wifi */
+
   bool connectToWifi = false;
   if (ag->isOne()) {
-    /** Show message confirm offline mode, should me perform if LED bar button
-     * test pressed */
+
+
     if (ledBarButtonTest == false) {
       oledDisplay.setText(
           "Press now for",
@@ -209,12 +214,12 @@ void setup() {
         initMqtt();
         sendDataToAg();
 
-        #ifdef ESP8266
-          // ota not supported
-        #else
-          firmwareCheckForUpdate();
-          checkForUpdateSchedule.update();
-        #endif
+#ifdef ESP8266
+
+#else
+        firmwareCheckForUpdate();
+        checkForUpdateSchedule.update();
+#endif
 
         apiClient.fetchServerConfiguration();
         configSchedule.update();
@@ -244,75 +249,55 @@ void setup() {
       }
     }
   }
-  /** Set offline mode without saving, cause wifi is not configured */
+
   if (wifiConnector.hasConfigurated() == false) {
     Serial.println("Set offline mode cause wifi is not configurated");
     configuration.setOfflineModeWithoutSave(true);
   }
 
-  /** Show display Warning up */
+
   if (ag->isOne()) {
     oledDisplay.setText("Warming Up", "Serial Number:", ag->deviceId().c_str());
     delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
 
-    Serial.println("Display brightness: " + String(configuration.getDisplayBrightness()));
+    Serial.println("Display brightness: " +
+                   String(configuration.getDisplayBrightness()));
     oledDisplay.setBrightness(configuration.getDisplayBrightness());
   }
 
-  // Update display and led bar after finishing setup to show dashboard
+
   updateDisplayAndLedBar();
+
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW initialization failed");
+    return;
+  }
+
+
+  esp_now_register_recv_cb(onDataRecv);
 }
 
 void loop() {
-  /** Handle schedule */
+
   dispLedSchedule.run();
   configSchedule.run();
   agApiPostSchedule.run();
 
-  if (configuration.hasSensorS8) {
-    co2Schedule.run();
-  }
-  if (configuration.hasSensorPMS1 || configuration.hasSensorPMS2) {
-    pmsSchedule.run();
-  }
-  if (ag->isOne()) {
-    if (configuration.hasSensorSHT) {
-      tempHumSchedule.run();
-    }
-  }
-  if (configuration.hasSensorSGP) {
-    tvocSchedule.run();
-  }
-  if (ag->isOne()) {
-    if (configuration.hasSensorPMS1) {
-      ag->pms5003.handle();
-      static bool pmsConnected = false;
-      if (pmsConnected != ag->pms5003.connected()) {
-        pmsConnected = ag->pms5003.connected();
-        Serial.printf("PMS sensor %s ", pmsConnected?"connected":"removed");
-      }
-    }
-  } else {
-    if (configuration.hasSensorPMS1) {
-      ag->pms5003t_1.handle();
-    }
-    if (configuration.hasSensorPMS2) {
-      ag->pms5003t_2.handle();
-    }
-  }
+  FidasSchedule.run();
 
   watchdogFeedSchedule.run();
 
-  /** Check for handle WiFi reconnect */
+
   wifiConnector.handle();
 
-  /** factory reset handle */
+
   factoryConfigReset();
 
-  /** check that local configura changed then do some action */
+
   configUpdateHandle();
 
-  /** Firmware check for update handle */
+
   checkForUpdateSchedule.run();
 }
 
@@ -358,7 +343,7 @@ static void createMqttTask(void) {
         for (;;) {
           delay(MQTT_SYNC_INTERVAL);
 
-          /** Send data */
+
           if (mqttClient.isConnected()) {
             String payload = measurements.toString(
                 true, fwMode, wifiConnector.RSSI(), ag, &configuration);
@@ -403,7 +388,7 @@ static void factoryConfigReset(void) {
     } else {
       uint32_t ms = (uint32_t)(millis() - factoryBtnPressTime);
       if (ms >= 2000) {
-        // Show display message: For factory keep for x seconds
+
         if (ag->isOne()) {
           oledDisplay.setText("Factory reset", "keep pressed", "for 8 sec");
         } else {
@@ -414,7 +399,6 @@ static void factoryConfigReset(void) {
         while (ag->button.getState() == ag->button.BUTTON_PRESSED) {
           delay(1000);
           if (ag->isOne()) {
-
             String str = "for " + String(count) + " sec";
             oledDisplay.setText("Factory reset", "keep pressed", str.c_str());
           } else {
@@ -422,16 +406,16 @@ static void factoryConfigReset(void) {
           }
           count--;
           if (count == 0) {
-            /** Stop MQTT task first */
+
             if (mqttTask) {
               vTaskDelete(mqttTask);
               mqttTask = NULL;
             }
 
-            /** Reset WIFI */
+
             WiFi.disconnect(true, true);
 
-            /** Reset local config */
+
             configuration.reset();
 
             if (ag->isOne()) {
@@ -440,12 +424,12 @@ static void factoryConfigReset(void) {
               Serial.println("Factory reset successful");
             }
             delay(3000);
-            oledDisplay.setText("","","");
+            oledDisplay.setText("", "", "");
             ESP.restart();
           }
         }
 
-        /** Show current content cause reset ignore */
+
         factoryBtnPressTime = 0;
         if (ag->isOne()) {
           updateDisplayAndLedBar();
@@ -455,7 +439,7 @@ static void factoryConfigReset(void) {
   } else {
     if (factoryBtnPressTime != 0) {
       if (ag->isOne()) {
-        /** Restore last display content */
+
         updateDisplayAndLedBar();
       }
     }
@@ -478,7 +462,7 @@ static void ledBarEnabledUpdate(void) {
       ag->ledBar.setBrightness(brightness);
       ag->ledBar.setEnable(configuration.getLedBarMode() != LedBarModeOff);
     }
-     ag->ledBar.show();
+    ag->ledBar.show();
   }
 }
 
@@ -513,111 +497,111 @@ static void firmwareCheckForUpdate(void) {
 static void otaHandlerCallback(OtaState state, String mesasge) {
   Serial.println("OTA message: " + mesasge);
   switch (state) {
-  case OtaState::OTA_STATE_BEGIN:
-    displayExecuteOta(state, fwNewVersion, 0);
-    break;
-  case OtaState::OTA_STATE_FAIL:
-    displayExecuteOta(state, "", 0);
-    break;
-  case OtaState::OTA_STATE_PROCESSING:
-    displayExecuteOta(state, "", mesasge.toInt());
-    break;
-  case OtaState::OTA_STATE_SUCCESS:
-    displayExecuteOta(state, "", mesasge.toInt());
-    break;
-  default:
-    break;
+    case OtaState::OTA_STATE_BEGIN:
+      displayExecuteOta(state, fwNewVersion, 0);
+      break;
+    case OtaState::OTA_STATE_FAIL:
+      displayExecuteOta(state, "", 0);
+      break;
+    case OtaState::OTA_STATE_PROCESSING:
+      displayExecuteOta(state, "", mesasge.toInt());
+      break;
+    case OtaState::OTA_STATE_SUCCESS:
+      displayExecuteOta(state, "", mesasge.toInt());
+      break;
+    default:
+      break;
   }
 }
 
 static void displayExecuteOta(OtaState state, String msg, int processing) {
   switch (state) {
-  case OtaState::OTA_STATE_BEGIN: {
-    if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateVersion(msg);
-    } else {
-      Serial.println("New firmware: " + msg);
+    case OtaState::OTA_STATE_BEGIN: {
+      if (ag->isOne()) {
+        oledDisplay.showFirmwareUpdateVersion(msg);
+      } else {
+        Serial.println("New firmware: " + msg);
+      }
+      delay(2500);
+      break;
     }
-    delay(2500);
-    break;
-  }
-  case OtaState::OTA_STATE_FAIL: {
-    if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateFailed();
-    } else {
-      Serial.println("Error: Firmware update: failed");
-    }
+    case OtaState::OTA_STATE_FAIL: {
+      if (ag->isOne()) {
+        oledDisplay.showFirmwareUpdateFailed();
+      } else {
+        Serial.println("Error: Firmware update: failed");
+      }
 
-    delay(2500);
-    break;
-  }
-  case OtaState::OTA_STATE_SKIP: {
-    if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateSkipped();
-    } else {
-      Serial.println("Firmware update: Skipped");
+      delay(2500);
+      break;
     }
+    case OtaState::OTA_STATE_SKIP: {
+      if (ag->isOne()) {
+        oledDisplay.showFirmwareUpdateSkipped();
+      } else {
+        Serial.println("Firmware update: Skipped");
+      }
 
-    delay(2500);
-    break;
-  }
-  case OtaState::OTA_STATE_UP_TO_DATE: {
-    if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateUpToDate();
-    } else {
-      Serial.println("Firmware update: up to date");
+      delay(2500);
+      break;
     }
+    case OtaState::OTA_STATE_UP_TO_DATE: {
+      if (ag->isOne()) {
+        oledDisplay.showFirmwareUpdateUpToDate();
+      } else {
+        Serial.println("Firmware update: up to date");
+      }
 
-    delay(2500);
-    break;
-  }
-  case OtaState::OTA_STATE_PROCESSING: {
-    if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateProgress(processing);
-    } else {
-      Serial.println("Firmware update: " + String(processing) + String("%"));
+      delay(2500);
+      break;
     }
+    case OtaState::OTA_STATE_PROCESSING: {
+      if (ag->isOne()) {
+        oledDisplay.showFirmwareUpdateProgress(processing);
+      } else {
+        Serial.println("Firmware update: " + String(processing) + String("%"));
+      }
 
-    break;
-  }
-  case OtaState::OTA_STATE_SUCCESS: {
-    int i = 6;
-    while(i != 0) {
-      i = i - 1;
-      Serial.println("OTA update performed, restarting ...");
+      break;
+    }
+    case OtaState::OTA_STATE_SUCCESS: {
       int i = 6;
       while (i != 0) {
         i = i - 1;
-        if (ag->isOne()) {
-          oledDisplay.showFirmwareUpdateSuccess(i);
-        } else {
-          Serial.println("Rebooting... " + String(i));
+        Serial.println("OTA update performed, restarting ...");
+        int i = 6;
+        while (i != 0) {
+          i = i - 1;
+          if (ag->isOne()) {
+            oledDisplay.showFirmwareUpdateSuccess(i);
+          } else {
+            Serial.println("Rebooting... " + String(i));
+          }
+
+          delay(1000);
         }
-        
-        delay(1000);
+        oledDisplay.setBrightness(0);
+        esp_restart();
       }
-      oledDisplay.setBrightness(0);
-      esp_restart();
+      break;
     }
-    break;
-  }
-  default:
-    break;
+    default:
+      break;
   }
 }
 
 static void sendDataToAg() {
-  /** Change oledDisplay and led state */
+
   if (ag->isOne()) {
     stateMachine.displayHandle(AgStateMachineWiFiOkServerConnecting);
   }
   stateMachine.handleLeds(AgStateMachineWiFiOkServerConnecting);
 
-  /** Task handle led connecting animation */
+
   xTaskCreate(
       [](void *obj) {
         for (;;) {
-          // ledSmHandler();
+
           stateMachine.handleLeds();
           if (stateMachine.getLedState() !=
               AgStateMachineWiFiOkServerConnecting) {
@@ -652,12 +636,12 @@ void dispSensorNotFound(String ss) {
 }
 
 static void oneIndoorInit(void) {
-  configuration.hasSensorPMS2 = false;
 
-  /** Display init */
+
+
   oledDisplay.begin();
 
-  /** Show boot display */
+
   Serial.println("Firmware Version: " + ag->getVersion());
 
   oledDisplay.setText("AirGradient ONE",
@@ -668,7 +652,7 @@ static void oneIndoorInit(void) {
   ag->button.begin();
   ag->watchdog.begin();
 
-  /** Run LED test on start up if button pressed */
+
   oledDisplay.setText("Press now for", "LED test", "");
   ledBarButtonTest = false;
   uint32_t stime = millis();
@@ -685,50 +669,23 @@ static void oneIndoorInit(void) {
     }
   }
 
-  /** Check for button to reset WiFi connecto to "airgraident" after test LED
-   * bar */
+
+
   if (ledBarButtonTest) {
     if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
       WiFi.begin("airgradient", "cleanair");
       oledDisplay.setText("Configure WiFi", "connect to", "\'airgradient\'");
       delay(2500);
-      oledDisplay.setText("Rebooting...", "","");
+      oledDisplay.setText("Rebooting...", "", "");
       delay(2500);
-      oledDisplay.setText("","","");
+      oledDisplay.setText("", "", "");
       ESP.restart();
     }
   }
   ledBarEnabledUpdate();
 
-  /** Show message init sensor */
+
   oledDisplay.setText("Monitor", "initializing...", "");
-
-  /** Init sensor SGP41 */
-  if (sgp41Init() == false) {
-    dispSensorNotFound("SGP41");
-  }
-
-  /** INit SHT */
-  if (ag->sht.begin(Wire) == false) {
-    Serial.println("SHTx sensor not found");
-    configuration.hasSensorSHT = false;
-    dispSensorNotFound("SHT");
-  }
-
-  /** Init S8 CO2 sensor */
-  if (ag->s8.begin(Serial1) == false) {
-    Serial.println("CO2 S8 sensor not found");
-    configuration.hasSensorS8 = false;
-    dispSensorNotFound("S8");
-  }
-
-  /** Init PMS5003 */
-  if (ag->pms5003.begin(Serial0) == false) {
-    Serial.println("PMS sensor not found");
-    configuration.hasSensorPMS1 = false;
-
-    dispSensorNotFound("PMS");
-  }
 }
 static void openAirInit(void) {
   configuration.hasSensorSHT = false;
@@ -740,10 +697,10 @@ static void openAirInit(void) {
   ag->button.begin();
   ag->statusLed.begin();
 
-  /** detect sensor: PMS5003, PMS5003T, SGP41 and S8 */
-  /**
-   * Serial1 and Serial0 is use for connect S8 and PM sensor or both PM
-   */
+
+
+
+
   bool serial1Available = true;
   bool serial0Available = true;
 
@@ -751,7 +708,7 @@ static void openAirInit(void) {
     Serial1.end();
     delay(200);
     Serial.println("Can not detect S8 on Serial1, try on Serial0");
-    /** Check on other port */
+
     if (ag->s8.begin(Serial0) == false) {
       configuration.hasSensorS8 = false;
 
@@ -782,7 +739,7 @@ static void openAirInit(void) {
     }
   }
 
-  /** Attempt to detect PM sensors */
+
   if (fwMode == FW_MODE_O_1PST) {
     bool pmInitSuccess = false;
     if (serial0Available) {
@@ -806,7 +763,7 @@ static void openAirInit(void) {
         }
       }
     }
-    configuration.hasSensorPMS2 = false; // Disable PM2
+    configuration.hasSensorPMS2 = false;
   } else {
     if (ag->pms5003t_1.begin(Serial0) == false) {
       configuration.hasSensorPMS1 = false;
@@ -830,12 +787,6 @@ static void openAirInit(void) {
     }
   }
 
-  /** update the PMS poll period base on fw mode and sensor available */
-  if (fwMode != FW_MODE_O_1PST) {
-    if (configuration.hasSensorPMS1 && configuration.hasSensorPMS2) {
-      pmsSchedule.setPeriod(2000);
-    }
-  }
   Serial.printf("Firmware Mode: %s\r\n", AgFirmwareModeName(fwMode));
 }
 
@@ -844,15 +795,6 @@ static void boardInit(void) {
     oneIndoorInit();
   } else {
     openAirInit();
-  }
-
-  /** Set S8 CO2 abc days period */
-  if (configuration.hasSensorS8) {
-    if (ag->s8.setAbcPeriod(configuration.getCO2CalibrationAbcDays() * 24)) {
-      Serial.println("Set S8 AbcDays successful");
-    } else {
-      Serial.println("Set S8 AbcDays failure");
-    }
   }
 
   localServer.setFwMode(fwMode);
@@ -926,7 +868,7 @@ static void configUpdateHandle() {
       if (configuration.getLedBarBrightness() == 0) {
         ag->ledBar.setEnable(false);
       } else {
-        if(configuration.getLedBarMode() == LedBarMode::LedBarModeOff) {
+        if (configuration.getLedBarMode() == LedBarMode::LedBarModeOff) {
           ag->ledBar.setEnable(false);
         } else {
           ag->ledBar.setEnable(true);
@@ -941,23 +883,22 @@ static void configUpdateHandle() {
     }
 
     stateMachine.executeLedBarTest();
-  }
-  else if(ag->isOpenAir()) {
+  } else if (ag->isOpenAir()) {
     stateMachine.executeLedBarTest();
   }
 
-  // Update display and led bar notification based on updated configuration
+
   updateDisplayAndLedBar();
 }
 
 static void updateDisplayAndLedBar(void) {
   if (factoryBtnPressTime != 0) {
-    // Do not distrub factory reset sequence countdown
+
     return;
   }
 
   if (configuration.isOfflineMode()) {
-    // Ignore network related status when in offline mode
+
     stateMachine.displayHandle(AgStateMachineNormal);
     stateMachine.handleLeds(AgStateMachineNormal);
     return;
@@ -973,7 +914,8 @@ static void updateDisplayAndLedBar(void) {
     } else {
       stateMachine.displayClearAddToDashBoard();
     }
-  } else if (apiClient.isPostToServerFailed() && configuration.isPostDataToAirGradient()) {
+  } else if (apiClient.isPostToServerFailed() &&
+             configuration.isPostDataToAirGradient()) {
     state = AgStateMachineServerLost;
   }
 
@@ -1008,7 +950,8 @@ static void updatePm(void) {
       Serial.printf("PM2.5 ug/m3: %d\r\n", measurements.pm25_1);
       Serial.printf("PM10 ug/m3: %d\r\n", measurements.pm10_1);
       Serial.printf("PM0.3 Count: %d\r\n", measurements.pm03PCount_1);
-      Serial.printf("PM firmware version: %d\r\n", ag->pms5003.getFirmwareVersion());
+      Serial.printf("PM firmware version: %d\r\n",
+                    ag->pms5003.getFirmwareVersion());
       ag->pms5003.resetFailCount();
     } else {
       ag->pms5003.updateFailCount();
@@ -1048,13 +991,15 @@ static void updatePm(void) {
                     ag->pms5003t_1.compensateTemp(measurements.temp_1));
       Serial.printf("[1] Relative Humidity compensated: %0.2f\r\n",
                     ag->pms5003t_1.compensateHum(measurements.hum_1));
-      Serial.printf("[1] PM firmware version: %d\r\n", ag->pms5003t_1.getFirmwareVersion());
+      Serial.printf("[1] PM firmware version: %d\r\n",
+                    ag->pms5003t_1.getFirmwareVersion());
 
       ag->pms5003t_1.resetFailCount();
     } else {
       if (configuration.hasSensorPMS1) {
         ag->pms5003t_1.updateFailCount();
-        Serial.printf("[1] PMS read failed %d times\r\n", ag->pms5003t_1.getFailCount());
+        Serial.printf("[1] PMS read failed %d times\r\n",
+                      ag->pms5003t_1.getFailCount());
 
         if (ag->pms5003t_1.getFailCount() >= PMS_FAIL_COUNT_SET_INVALID) {
           measurements.pm01_1 = utils::getInvalidPmValue();
@@ -1092,13 +1037,15 @@ static void updatePm(void) {
                     ag->pms5003t_1.compensateTemp(measurements.temp_2));
       Serial.printf("[2] Relative Humidity compensated: %0.2f\r\n",
                     ag->pms5003t_1.compensateHum(measurements.hum_2));
-      Serial.printf("[2] PM firmware version: %d\r\n", ag->pms5003t_2.getFirmwareVersion());
+      Serial.printf("[2] PM firmware version: %d\r\n",
+                    ag->pms5003t_2.getFirmwareVersion());
 
       ag->pms5003t_2.resetFailCount();
     } else {
       if (configuration.hasSensorPMS2) {
         ag->pms5003t_2.updateFailCount();
-        Serial.printf("[2] PMS read failed %d times\r\n", ag->pms5003t_2.getFailCount());
+        Serial.printf("[2] PMS read failed %d times\r\n",
+                      ag->pms5003t_2.getFailCount());
 
         if (ag->pms5003t_2.getFailCount() >= PMS_FAIL_COUNT_SET_INVALID) {
           measurements.pm01_2 = utils::getInvalidPmValue();
@@ -1117,7 +1064,7 @@ static void updatePm(void) {
 
     if (configuration.hasSensorPMS1 && configuration.hasSensorPMS2 &&
         pmsResult_1 && pmsResult_2) {
-      /** Get total of PMS1*/
+
       measurements.pm1Value01 = measurements.pm1Value01 + measurements.pm01_1;
       measurements.pm1Value25 = measurements.pm1Value25 + measurements.pm25_1;
       measurements.pm1Value10 = measurements.pm1Value10 + measurements.pm10_1;
@@ -1126,7 +1073,7 @@ static void updatePm(void) {
       measurements.pm1temp = measurements.pm1temp + measurements.temp_1;
       measurements.pm1hum = measurements.pm1hum + measurements.hum_1;
 
-      /** Get total of PMS2 */
+
       measurements.pm2Value01 = measurements.pm2Value01 + measurements.pm01_2;
       measurements.pm2Value25 = measurements.pm2Value25 + measurements.pm25_2;
       measurements.pm2Value10 = measurements.pm2Value10 + measurements.pm10_2;
@@ -1137,7 +1084,7 @@ static void updatePm(void) {
 
       measurements.countPosition++;
 
-      /** Get average */
+
       if (measurements.countPosition == measurements.targetCount) {
         measurements.pm01_1 =
             measurements.pm1Value01 / measurements.targetCount;
@@ -1214,14 +1161,16 @@ static void updatePm(void) {
   }
 
   if (restart) {
-    Serial.printf("PMS failure count reach to max set %d, restarting...", ag->pms5003.getFailCountMax());
+    Serial.printf("PMS failure count reach to max set %d, restarting...",
+                  ag->pms5003.getFailCountMax());
     ESP.restart();
   }
 }
 
 static void sendDataToServer(void) {
-  /** Ignore send data to server if postToAirGradient disabled */
-  if (configuration.isPostDataToAirGradient() == false || configuration.isOfflineMode()) {
+
+  if (configuration.isPostDataToAirGradient() == false ||
+      configuration.isOfflineMode()) {
     return;
   }
 
@@ -1249,7 +1198,7 @@ static void tempHumUpdate(void) {
     Serial.printf("Relative Humidity compensated: %d\r\n",
                   measurements.Humidity);
 
-    // Update compensation temperature and humidity for SGP41
+
     if (configuration.hasSensorSGP) {
       ag->sgp41.setCompensationTemperatureHumidity(measurements.Temperature,
                                                    measurements.Humidity);
@@ -1259,4 +1208,17 @@ static void tempHumUpdate(void) {
     measurements.Humidity = utils::getInvalidHumidity();
     Serial.println("SHT read failed");
   }
+}
+
+static void updateFidas(void) {
+  fidasSensor.handle();
+
+
+  measurements.Temperature = fidasSensor.getTemperature();
+  measurements.Humidity = fidasSensor.getHumidity();
+  measurements.pm25_1 = fidasSensor.getPM25();
+
+  Serial.printf("Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³\n",
+                measurements.Temperature, measurements.Humidity,
+                measurements.pm25_1);
 }
