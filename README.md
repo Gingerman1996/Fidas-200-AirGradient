@@ -38,15 +38,21 @@ The following modifications were made to adapt the code for use with the Fidas 2
 
    ```cpp
    static void updateFidas(void) {
-     fidasSensor.handle();
+      fidasSensor.handle();
 
-     // Retrieve the values and print them
-     measurements.Temperature = fidasSensor.getTemperature();
-     measurements.Humidity = fidasSensor.getHumidity();
-     measurements.pm25_1 = fidasSensor.getPM25();
+      // Retrieve the values and print them
+      measurements.Temperature = fidasSensor.getTemperature();
+      measurements.Humidity = fidasSensor.getHumidity();
+      measurements.pm25_1 = fidasSensor.getPM25();
+      measurements.pm01_1 = fidasSensor.getPM1();
+      measurements.pm10_1 = fidasSensor.getPM10();
+      measurements.pm03PCount_1 = fidasSensor.getPCount();
 
-     Serial.printf("Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³\n",
-                   measurements.Temperature, measurements.Humidity, measurements.pm25_1);
+      Serial.printf(
+            "Temperature: %.2f °C, Humidity: %d %%, PM2.5: %d µg/m³, PM1: %d µg/m³, "
+            "PM10: %d µg/m³, Particle Count: %.2f\n",
+            measurements.Temperature, measurements.Humidity, measurements.pm25_1,
+            measurements.pm01_1, measurements.pm10_1, measurements.pm03PCount_1);
    }
    ```
    The Fidas 200 sensor data is updated using the above function. The retrieved values for temperature, humidity, and PM2.5 are stored in the `measurements`structure.
