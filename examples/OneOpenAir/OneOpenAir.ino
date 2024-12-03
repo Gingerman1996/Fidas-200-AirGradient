@@ -5,7 +5,7 @@ open-source hardware Air Quality Monitor with ESP32-C3 Microcontroller.
 It is an air quality monitor for PM2.5, CO2, TVOCs, NOx, Temperature and
 Humidity with a small display, an RGB led bar and can send data over Wifi.
 
-Open source air quality monitors and kits are available:
+// Open source air quality monitors and kits are available:
 Indoor Monitor: https://www.airgradient.com/indoor/
 Outdoor Monitor: https://www.airgradient.com/outdoor/
 

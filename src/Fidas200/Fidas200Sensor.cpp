@@ -25,7 +25,7 @@ char Fidas200Sensor::calculateBCC(const char *buffer) {
   while (buffer[i] != 0) {
     bcc ^= (unsigned char)buffer[i++];
   }
-  return bcc;  // Return the final BCC value
+  return bcc; // Return the final BCC value
 }
 
 /**
@@ -40,7 +40,7 @@ bool Fidas200Sensor::verifyBCC(const String &message) {
   int start = message.indexOf('<');
   int end = message.indexOf('>');
   if (start == -1 || end == -1 || end <= start + 1) {
-    return false;  // Return false if the message format is invalid
+    return false; // Return false if the message format is invalid
   }
 
   // Extract the data within the < > for BCC calculation
@@ -49,7 +49,7 @@ bool Fidas200Sensor::verifyBCC(const String &message) {
   char calculatedBCC = calculateBCC(data.c_str());
 
   return receivedBCC ==
-         calculatedBCC;  // Return true if BCC matches, false otherwise
+         calculatedBCC; // Return true if BCC matches, false otherwise
 }
 
 /**
@@ -82,7 +82,7 @@ void Fidas200Sensor::parseValues(const String &message) {
   int start = message.indexOf('<');
   int end = message.indexOf('>');
   if (start == -1 || end == -1) {
-    return;  // Exit if the message format is invalid
+    return; // Exit if the message format is invalid
   }
 
   // Extract the data within < >
@@ -98,8 +98,8 @@ void Fidas200Sensor::parseValues(const String &message) {
   Serial.println();
 
   if (tempIndex == -1 || humidityIndex == -1 || pm25Index == -1 ||
-          pm1Index == -1 || pm10Index == -1 || pmPCountIndex == -1) {
-    return;  // Exit if any expected values are missing
+      pm1Index == -1 || pm10Index == -1 || pmPCountIndex == -1) {
+    return; // Exit if any expected values are missing
   }
 
   // Update the stored values for temperature, humidity, and PM2.5
@@ -108,11 +108,11 @@ void Fidas200Sensor::parseValues(const String &message) {
   humidity = data.substring(humidityIndex + 3, data.indexOf(';', humidityIndex))
                  .toFloat();
   pm25 = data.substring(pm25Index + 3, data.indexOf(';', pm25Index)).toFloat() *
-         1000;  // Convert from mg/m³ to µg/m³
+         1000; // Convert from mg/m³ to µg/m³
   pm1 = data.substring(pm1Index + 3, data.indexOf(';', pm1Index)).toFloat() *
-        1000;  // Convert from mg/m³ to µg/m³
+        1000; // Convert from mg/m³ to µg/m³
   pm10 = data.substring(pm10Index + 3, data.indexOf(';', pm10Index)).toFloat() *
-         1000;  // Convert from mg/m³ to µg/m³
+         1000; // Convert from mg/m³ to µg/m³
   pmPCount = data.substring(pmPCountIndex + 3).toFloat();
 }
 
@@ -128,10 +128,10 @@ void Fidas200Sensor::sendCommand() {
 
   // Send the command to the sensor
   serialPort->print(buffer);
-  serialPort->printf("%02X\r\n", bcc);  // Append BCC in hexadecimal format
+  serialPort->printf("%02X\r\n", bcc); // Append BCC in hexadecimal format
 
-  waitingForResponse = true;  // Set flag to indicate waiting for a response
-  lastSendTime = millis();    // Record the time of the last command sent
+  waitingForResponse = true; // Set flag to indicate waiting for a response
+  lastSendTime = millis();   // Record the time of the last command sent
 }
 
 /**
@@ -142,16 +142,16 @@ void Fidas200Sensor::sendCommand() {
 void Fidas200Sensor::readResponse() {
   if (serialPort->available()) {
     String response = serialPort->readStringUntil(
-        '\n');  // Read the incoming response until newline
+        '\n'); // Read the incoming response until newline
     waitingForResponse =
-        false;  // Clear the waiting flag after receiving the response
+        false; // Clear the waiting flag after receiving the response
 
     // Verify the BCC of the received response
     if (verifyBCC(response)) {
-      parseValues(response);  // Parse and store the values if BCC is valid
-      retryCount = 0;         // Reset retry counter on successful response
+      parseValues(response); // Parse and store the values if BCC is valid
+      retryCount = 0;        // Reset retry counter on successful response
     } else {
-      sendCommand();  // Retry sending the command if BCC verification fails
+      sendCommand(); // Retry sending the command if BCC verification fails
     }
   }
 }
@@ -164,23 +164,24 @@ void Fidas200Sensor::readResponse() {
 void Fidas200Sensor::handle() {
   // If waiting for a response, check if 5 seconds have passed since the last
   // command was sent
-  if (waitingForResponse) {
-    if (millis() - lastSendTime >= 5000) {
-      // If 5 seconds have passed without a response, retry sending the command
-      retryCount++;
-      if (retryCount <= 3) {
-        sendCommand();  // Retry sending the command
-      } else {
-        // If retry limit is reached, reset the retry counter
-        retryCount = 0;
-        waitingForResponse = false;
-      }
-    }
-  } else {
-    // If not waiting for a response, send a new command
-    sendCommand();
-  }
-
+  // if (waitingForResponse) {
+  //   if (millis() - lastSendTime >= 5000) {
+  //     // If 5 seconds have passed without a response, retry sending the
+  //     command retryCount++; if (retryCount <= 3) {
+  //       sendCommand();  // Retry sending the command
+  //     } else {
+  //       // If retry limit is reached, reset the retry counter
+  //       retryCount = 0;
+  //       waitingForResponse = false;
+  //     }
+  //   }
+  // } else {
+  //   // If not waiting for a response, send a new command
+  //   sendCommand();
+  // }
+  delay(100);
+  sendCommand();
+  delay(100);
   // Read the response if available
   readResponse();
 }
