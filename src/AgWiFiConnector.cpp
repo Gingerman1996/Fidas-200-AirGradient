@@ -411,5 +411,5 @@ bool WifiConnector::isConfigurePorttalTimeout(void) { return connectorTimeout; }
  * 
  */
 void WifiConnector::setDefault(void) {
-  WiFi.begin("airgradient", "cleanair");
+  WiFi.begin("ag-diamond_2.4GHz", "0505563014466");
 }

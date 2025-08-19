@@ -47,8 +47,8 @@ public:
   bool hasConfigurated(void);
   bool isConfigurePorttalTimeout(void);
 
-  const char* defaultSsid = "airgradient";
-  const char* defaultPassword = "cleanair";
+  const char* defaultSsid = "ag-diamond_2.4GHz";
+  const char* defaultPassword = "0505563014466";
   void setDefault(void);
 };
 

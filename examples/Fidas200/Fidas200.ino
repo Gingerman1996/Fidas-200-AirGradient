@@ -40,6 +40,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 #include "AgApiClient.h"
 #include "AgConfigure.h"
@@ -54,6 +55,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "OpenMetrics.h"
 #include "OtaHandler.h"
 #include "WebServer.h"
+#include "ESPNowSender.h"
 
 #define LED_BAR_ANIMATION_PERIOD 100                  /** ms */
 #define DISP_UPDATE_INTERVAL 2500                     /** ms */
@@ -68,10 +70,14 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #define DISPLAY_DELAY_SHOW_CONTENT_MS 2000            /** ms */
 #define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000) /** ms */
 
+#define ESP_NOW_INTERVAL 2000
+
 /** I2C define */
 #define I2C_SDA_PIN 7
 #define I2C_SCL_PIN 6
 #define OLED_I2C_ADDR 0x3C
+
+uint8_t controllerMac[] = {0x94, 0xE6, 0x86, 0x8D, 0x45, 0xB0}; // Replace with actual controller MAC
 
 static MqttClient mqttClient(Serial);
 static TaskHandle_t mqttTask = NULL;
@@ -117,6 +123,7 @@ static void firmwareCheckForUpdate(void);
 static void otaHandlerCallback(OtaState state, String mesasge);
 static void displayExecuteOta(OtaState state, String msg, int processing);
 static void updateFidas(void);
+static void sendDataToEspNow(void);
 
 AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, updateDisplayAndLedBar);
 AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
@@ -127,37 +134,14 @@ AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
 AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS,
                                   firmwareCheckForUpdate);
 AgSchedule FidasSchedule(SENSOR_PM_UPDATE_INTERVAL, updateFidas);
+AgSchedule espnowSchedule(ESP_NOW_INTERVAL, sendDataToEspNow);
 
 Fidas200Sensor fidasSensor(&Serial0);
+ESPNowSender espNowSender(controllerMac);
 
-// Define the structure for the message
-typedef struct struct_message {
-  char message[32];  // Incoming message
-  float pm25;        // PM2.5 value
-} struct_message;
 
-struct_message myData;
 
-// Callback function when data is received
-void onDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
-  memcpy(&myData, incomingData, sizeof(myData));
-  if (strcmp(myData.message, "GetFidasData") ==
-      0) {  // Check if the message is "GetFidasData"
-    Serial.println("Received 'GetFidasData' request");
-
-    // Prepare the response data
-    strcpy(myData.message, "FidasDataResponse");
-    myData.pm25 = fidasSensor.getPM25();  // Example PM2.5 value
-
-    // Send the response back to the Sender
-    esp_err_t result = esp_now_send(mac, (uint8_t *)&myData, sizeof(myData));
-    if (result == ESP_OK) {
-      Serial.println("Response sent successfully");
-    } else {
-      Serial.println("Failed to send response");
-    }
-  }
-}
+esp_now_pm_data_t espNowData = {0};
 
 void setup() {
   /** Serial for print debug message */
@@ -198,6 +182,9 @@ void setup() {
   /** Init sensor */
   boardInit();
 
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+
   /** Connecting wifi */
   bool connectToWifi = false;
   if (ag->isOne()) {
@@ -236,6 +223,10 @@ void setup() {
 
     if (wifiConnector.connect()) {
       if (wifiConnector.isConnected()) {
+        // Set WiFi channel to 11 for ESP-NOW
+        esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
+        Serial.println("WiFi channel set to 11");
+
         mdnsInit();
         localServer.begin();
         initMqtt();
@@ -266,6 +257,14 @@ void setup() {
         } else {
           ledBarEnabledUpdate();
         }
+
+        espNowSender.begin();
+        
+        // Initialize NTP after WiFi connection is established
+        if (WiFi.status() == WL_CONNECTED) {
+          espNowSender.initNTP();
+        }
+        
       } else {
         if (wifiConnector.isConfigurePorttalTimeout()) {
           oledDisplay.showRebooting();
@@ -294,15 +293,6 @@ void setup() {
 
   // Update display and led bar after finishing setup to show dashboard
   updateDisplayAndLedBar();
-
-  // Initialize ESP-NOW
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW initialization failed");
-    return;
-  }
-
-  // Register the callback for receiving data
-  esp_now_register_recv_cb(onDataRecv);
 }
 
 void loop() {
@@ -317,6 +307,7 @@ void loop() {
 
   /** Check for handle WiFi reconnect */
   wifiConnector.handle();
+  espnowSchedule.run();
 
   /** factory reset handle */
   factoryConfigReset();
@@ -524,96 +515,96 @@ static void firmwareCheckForUpdate(void) {
 static void otaHandlerCallback(OtaState state, String mesasge) {
   Serial.println("OTA message: " + mesasge);
   switch (state) {
-    case OtaState::OTA_STATE_BEGIN:
-      displayExecuteOta(state, fwNewVersion, 0);
-      break;
-    case OtaState::OTA_STATE_FAIL:
-      displayExecuteOta(state, "", 0);
-      break;
-    case OtaState::OTA_STATE_PROCESSING:
-      displayExecuteOta(state, "", mesasge.toInt());
-      break;
-    case OtaState::OTA_STATE_SUCCESS:
-      displayExecuteOta(state, "", mesasge.toInt());
-      break;
-    default:
-      break;
+  case OtaState::OTA_STATE_BEGIN:
+    displayExecuteOta(state, fwNewVersion, 0);
+    break;
+  case OtaState::OTA_STATE_FAIL:
+    displayExecuteOta(state, "", 0);
+    break;
+  case OtaState::OTA_STATE_PROCESSING:
+    displayExecuteOta(state, "", mesasge.toInt());
+    break;
+  case OtaState::OTA_STATE_SUCCESS:
+    displayExecuteOta(state, "", mesasge.toInt());
+    break;
+  default:
+    break;
   }
 }
 
 static void displayExecuteOta(OtaState state, String msg, int processing) {
   switch (state) {
-    case OtaState::OTA_STATE_BEGIN: {
-      if (ag->isOne()) {
-        oledDisplay.showFirmwareUpdateVersion(msg);
-      } else {
-        Serial.println("New firmware: " + msg);
-      }
-      delay(2500);
-      break;
+  case OtaState::OTA_STATE_BEGIN: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateVersion(msg);
+    } else {
+      Serial.println("New firmware: " + msg);
     }
-    case OtaState::OTA_STATE_FAIL: {
-      if (ag->isOne()) {
-        oledDisplay.showFirmwareUpdateFailed();
-      } else {
-        Serial.println("Error: Firmware update: failed");
-      }
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_FAIL: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateFailed();
+    } else {
+      Serial.println("Error: Firmware update: failed");
+    }
 
-      delay(2500);
-      break;
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_SKIP: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateSkipped();
+    } else {
+      Serial.println("Firmware update: Skipped");
     }
-    case OtaState::OTA_STATE_SKIP: {
-      if (ag->isOne()) {
-        oledDisplay.showFirmwareUpdateSkipped();
-      } else {
-        Serial.println("Firmware update: Skipped");
-      }
 
-      delay(2500);
-      break;
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_UP_TO_DATE: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateUpToDate();
+    } else {
+      Serial.println("Firmware update: up to date");
     }
-    case OtaState::OTA_STATE_UP_TO_DATE: {
-      if (ag->isOne()) {
-        oledDisplay.showFirmwareUpdateUpToDate();
-      } else {
-        Serial.println("Firmware update: up to date");
-      }
 
-      delay(2500);
-      break;
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_PROCESSING: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateProgress(processing);
+    } else {
+      Serial.println("Firmware update: " + String(processing) + String("%"));
     }
-    case OtaState::OTA_STATE_PROCESSING: {
-      if (ag->isOne()) {
-        oledDisplay.showFirmwareUpdateProgress(processing);
-      } else {
-        Serial.println("Firmware update: " + String(processing) + String("%"));
-      }
 
-      break;
-    }
-    case OtaState::OTA_STATE_SUCCESS: {
+    break;
+  }
+  case OtaState::OTA_STATE_SUCCESS: {
+    int i = 6;
+    while (i != 0) {
+      i = i - 1;
+      Serial.println("OTA update performed, restarting ...");
       int i = 6;
       while (i != 0) {
         i = i - 1;
-        Serial.println("OTA update performed, restarting ...");
-        int i = 6;
-        while (i != 0) {
-          i = i - 1;
-          if (ag->isOne()) {
-            oledDisplay.showFirmwareUpdateSuccess(i);
-          } else {
-            Serial.println("Rebooting... " + String(i));
-          }
-
-          delay(1000);
+        if (ag->isOne()) {
+          oledDisplay.showFirmwareUpdateSuccess(i);
+        } else {
+          Serial.println("Rebooting... " + String(i));
         }
-        oledDisplay.setBrightness(0);
-        esp_restart();
+
+        delay(1000);
       }
-      break;
+      oledDisplay.setBrightness(0);
+      esp_restart();
     }
-    default:
-      break;
+    break;
+  }
+  default:
+    break;
   }
 }
 
@@ -790,7 +781,7 @@ static void openAirInit(void) {
         }
       }
     }
-    configuration.hasSensorPMS2 = false;  // Disable PM2
+    configuration.hasSensorPMS2 = false; // Disable PM2
   } else {
     if (ag->pms5003t_1.begin(Serial0) == false) {
       configuration.hasSensorPMS1 = false;
@@ -1253,4 +1244,13 @@ static void updateFidas(void) {
       "PM10: %d µg/m³, Particle Count: %.d\n",
       measurements.Temperature, measurements.Humidity, measurements.pm25_1,
       measurements.pm01_1, measurements.pm10_1, measurements.pm03PCount_1);
+}
+
+static void sendDataToEspNow(void) {
+  espNowData.pm02 = measurements.pm25_1;
+  espNowData.pm10 = measurements.pm10_1;
+  espNowData.wifi_rssi = wifiConnector.RSSI();
+  espNowData.timestamp = millis();
+
+  espNowSender.sendData(espNowData);
 }
