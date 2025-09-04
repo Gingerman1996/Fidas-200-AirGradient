@@ -1,41 +1,7 @@
-/*
-This is the combined firmware code for AirGradient ONE and AirGradient Open Air
-open-source hardware Air Quality Monitor with ESP32-C3 Microcontroller.
-
-It is an air quality monitor for PM2.5, CO2, TVOCs, NOx, Temperature and
-Humidity with a small display, an RGB led bar and can send data over Wifi.
-
-Open source air quality monitors and kits are available:
-Indoor Monitor: https://www.airgradient.com/indoor/
-Outdoor Monitor: https://www.airgradient.com/outdoor/
-
-Build Instructions: AirGradient ONE:
-https://www.airgradient.com/documentation/one-v9/ Build Instructions:
-AirGradient Open Air:
-https://www.airgradient.com/documentation/open-air-pst-kit-1-3/
-
-Please make sure you have esp32 board manager installed. Tested with
-version 2.0.11.
-
-Important flashing settings:
-- Set board to "ESP32C3 Dev Module"
-- Enable "USB CDC On Boot"
-- Flash frequency "80Mhz"
-- Flash mode "QIO"
-- Flash size "4MB"
-- Partition scheme "Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)"
-- JTAG adapter "Disabled"
-
-Configuration parameters, e.g. Celsius / Fahrenheit or PM unit (US AQI vs ug/m3)
-can be set through the AirGradient dashboard.
-
-If you have any questions please visit our forum at
-https://forum.airgradient.com/
-
-CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
-
-*/
-
+# 1 "/var/folders/xt/jjyk_px56d73pvpdws6gt1_c0000gn/T/tmp_wh61mdn"
+#include <Arduino.h>
+# 1 "/Users/formylife/Documents/airgradient_code/Fidas-200-AirGradient/examples/Fidas200/Fidas200.ino"
+# 39 "/Users/formylife/Documents/airgradient_code/Fidas-200-AirGradient/examples/Fidas200/Fidas200.ino"
 #include <HardwareSerial.h>
 #include <WebServer.h>
 #include <WiFi.h>
@@ -56,28 +22,28 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "WebServer.h"
 #include "UdpSender.h"
 
-#define LED_BAR_ANIMATION_PERIOD 100                  /** ms */
-#define DISP_UPDATE_INTERVAL 2500                     /** ms */
-#define SERVER_CONFIG_SYNC_INTERVAL 60000             /** ms */
-#define SERVER_SYNC_INTERVAL 60000                    /** ms */
-#define MQTT_SYNC_INTERVAL 60000                      /** ms */
-#define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5              /** sec */
-#define SENSOR_TVOC_UPDATE_INTERVAL 1000              /** ms */
-#define SENSOR_CO2_UPDATE_INTERVAL 4000               /** ms */
-#define SENSOR_PM_UPDATE_INTERVAL 2000                /** ms */
-#define SENSOR_TEMP_HUM_UPDATE_INTERVAL 2000          /** ms */
-#define DISPLAY_DELAY_SHOW_CONTENT_MS 2000            /** ms */
-#define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000) /** ms */
+#define LED_BAR_ANIMATION_PERIOD 100
+#define DISP_UPDATE_INTERVAL 2500
+#define SERVER_CONFIG_SYNC_INTERVAL 60000
+#define SERVER_SYNC_INTERVAL 60000
+#define MQTT_SYNC_INTERVAL 60000
+#define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5
+#define SENSOR_TVOC_UPDATE_INTERVAL 1000
+#define SENSOR_CO2_UPDATE_INTERVAL 4000
+#define SENSOR_PM_UPDATE_INTERVAL 2000
+#define SENSOR_TEMP_HUM_UPDATE_INTERVAL 2000
+#define DISPLAY_DELAY_SHOW_CONTENT_MS 2000
+#define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000)
 
 #define UDP_SEND_INTERVAL 2000
 
-/** I2C define */
+
 #define I2C_SDA_PIN 7
 #define I2C_SCL_PIN 6
 #define OLED_I2C_ADDR 0x3C
 
-// UDP Configuration
-#define UDP_TARGET_IP "192.168.100.255"  // Broadcast IP - adjust according to your network
+
+#define UDP_TARGET_IP "192.168.100.255"
 #define UDP_PORT 8888
 
 static MqttClient mqttClient(Serial);
@@ -138,27 +104,34 @@ AgSchedule FidasSchedule(SENSOR_PM_UPDATE_INTERVAL, updateFidas);
 AgSchedule udpSchedule(UDP_SEND_INTERVAL, sendDataToUdp);
 
 Fidas200Sensor fidasSensor(&Serial0);
-UdpSender udpSender(UDP_PORT); // Use broadcast mode
+UdpSender udpSender(UDP_PORT);
 
 udp_pm_data_t udpData = {0};
-
+void setup();
+void loop();
+static void sendDataToAg();
+void dispSensorNotFound(String ss);
+static void oneIndoorInit(void);
+static void openAirInit(void);
+static void configUpdateHandle();
+#line 145 "/Users/formylife/Documents/airgradient_code/Fidas-200-AirGradient/examples/Fidas200/Fidas200.ino"
 void setup() {
-  /** Serial for print debug message */
+
   Serial.begin(115200);
-  delay(100); /** For bester show log */
+  delay(100);
   fidasSensor.begin(115200);
-  /** Print device ID into log */
+
   Serial.println("Serial nr: " + ag->deviceId());
 
-  /** Initialize local configure */
+
   configuration.begin();
 
-  /** Init I2C */
+
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   delay(1000);
 
-  /** Detect board type: ONE_INDOOR has OLED display, Scan the I2C address to
-   * identify board type */
+
+
   Wire.beginTransmission(OLED_I2C_ADDR);
   if (Wire.endTransmission() == 0x00) {
     ag = new AirGradient(BoardType::ONE_INDOOR);
@@ -175,20 +148,20 @@ void setup() {
   openMetrics.setAirGradient(ag);
   localServer.setAirGraident(ag);
 
-  /** Example set custom API root URL */
-  // apiClient.setApiRoot("https://example.custom.api");
 
-  /** Init sensor */
+
+
+
   boardInit();
 
-  // Set device as a Wi-Fi Station
+
   WiFi.mode(WIFI_STA);
 
-  /** Connecting wifi */
+
   bool connectToWifi = false;
   if (ag->isOne()) {
-    /** Show message confirm offline mode, should me perform if LED bar button
-     * test pressed */
+
+
     if (ledBarButtonTest == false) {
       oledDisplay.setText(
           "Press now for",
@@ -222,7 +195,7 @@ void setup() {
 
     if (wifiConnector.connect()) {
       if (wifiConnector.isConnected()) {
-        // WiFi channel setting no longer needed for UDP communication
+
         Serial.println("WiFi connected - UDP communication ready on any channel");
 
         mdnsInit();
@@ -231,7 +204,7 @@ void setup() {
         sendDataToAg();
 
 #ifdef ESP8266
-        // ota not supported
+
 #else
         firmwareCheckForUpdate();
         checkForUpdateSchedule.update();
@@ -257,12 +230,12 @@ void setup() {
         }
 
         udpSender.begin();
-        
-        // Initialize NTP after WiFi connection is established
+
+
         if (WiFi.status() == WL_CONNECTED) {
           udpSender.initNTP();
         }
-        
+
       } else {
         if (wifiConnector.isConfigurePorttalTimeout()) {
           oledDisplay.showRebooting();
@@ -273,13 +246,13 @@ void setup() {
       }
     }
   }
-  /** Set offline mode without saving, cause wifi is not configured */
+
   if (wifiConnector.hasConfigurated() == false) {
     Serial.println("Set offline mode cause wifi is not configurated");
     configuration.setOfflineModeWithoutSave(true);
   }
 
-  /** Show display Warning up */
+
   if (ag->isOne()) {
     oledDisplay.setText("Warming Up", "Serial Number:", ag->deviceId().c_str());
     delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
@@ -289,12 +262,12 @@ void setup() {
     oledDisplay.setBrightness(configuration.getDisplayBrightness());
   }
 
-  // Update display and led bar after finishing setup to show dashboard
+
   updateDisplayAndLedBar();
 }
 
 void loop() {
-  /** Handle schedule */
+
   dispLedSchedule.run();
   configSchedule.run();
   agApiPostSchedule.run();
@@ -303,17 +276,17 @@ void loop() {
 
   watchdogFeedSchedule.run();
 
-  /** Check for handle WiFi reconnect */
+
   wifiConnector.handle();
   udpSchedule.run();
 
-  /** factory reset handle */
+
   factoryConfigReset();
 
-  /** check that local configura changed then do some action */
+
   configUpdateHandle();
 
-  /** Firmware check for update handle */
+
   checkForUpdateSchedule.run();
 }
 
@@ -359,7 +332,7 @@ static void createMqttTask(void) {
         for (;;) {
           delay(MQTT_SYNC_INTERVAL);
 
-          /** Send data */
+
           if (mqttClient.isConnected()) {
             String payload = measurements.toString(
                 true, fwMode, wifiConnector.RSSI(), ag, &configuration);
@@ -404,7 +377,7 @@ static void factoryConfigReset(void) {
     } else {
       uint32_t ms = (uint32_t)(millis() - factoryBtnPressTime);
       if (ms >= 2000) {
-        // Show display message: For factory keep for x seconds
+
         if (ag->isOne()) {
           oledDisplay.setText("Factory reset", "keep pressed", "for 8 sec");
         } else {
@@ -422,16 +395,16 @@ static void factoryConfigReset(void) {
           }
           count--;
           if (count == 0) {
-            /** Stop MQTT task first */
+
             if (mqttTask) {
               vTaskDelete(mqttTask);
               mqttTask = NULL;
             }
 
-            /** Reset WIFI */
+
             WiFi.disconnect(true, true);
 
-            /** Reset local config */
+
             configuration.reset();
 
             if (ag->isOne()) {
@@ -445,7 +418,7 @@ static void factoryConfigReset(void) {
           }
         }
 
-        /** Show current content cause reset ignore */
+
         factoryBtnPressTime = 0;
         if (ag->isOne()) {
           updateDisplayAndLedBar();
@@ -455,7 +428,7 @@ static void factoryConfigReset(void) {
   } else {
     if (factoryBtnPressTime != 0) {
       if (ag->isOne()) {
-        /** Restore last display content */
+
         updateDisplayAndLedBar();
       }
     }
@@ -607,17 +580,17 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
 }
 
 static void sendDataToAg() {
-  /** Change oledDisplay and led state */
+
   if (ag->isOne()) {
     stateMachine.displayHandle(AgStateMachineWiFiOkServerConnecting);
   }
   stateMachine.handleLeds(AgStateMachineWiFiOkServerConnecting);
 
-  /** Task handle led connecting animation */
+
   xTaskCreate(
       [](void *obj) {
         for (;;) {
-          // ledSmHandler();
+
           stateMachine.handleLeds();
           if (stateMachine.getLedState() !=
               AgStateMachineWiFiOkServerConnecting) {
@@ -652,12 +625,12 @@ void dispSensorNotFound(String ss) {
 }
 
 static void oneIndoorInit(void) {
-  // configuration.hasSensorPMS2 = false;
 
-  /** Display init */
+
+
   oledDisplay.begin();
 
-  /** Show boot display */
+
   Serial.println("Firmware Version: " + ag->getVersion());
 
   oledDisplay.setText("AirGradient ONE",
@@ -668,7 +641,7 @@ static void oneIndoorInit(void) {
   ag->button.begin();
   ag->watchdog.begin();
 
-  /** Run LED test on start up if button pressed */
+
   oledDisplay.setText("Press now for", "LED test", "");
   ledBarButtonTest = false;
   uint32_t stime = millis();
@@ -685,8 +658,8 @@ static void oneIndoorInit(void) {
     }
   }
 
-  /** Check for button to reset WiFi connecto to "airgraident" after test LED
-   * bar */
+
+
   if (ledBarButtonTest) {
     if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
       WiFi.begin("airgradient", "cleanair");
@@ -700,7 +673,7 @@ static void oneIndoorInit(void) {
   }
   ledBarEnabledUpdate();
 
-  /** Show message init sensor */
+
   oledDisplay.setText("Monitor", "initializing...", "");
 }
 static void openAirInit(void) {
@@ -713,10 +686,10 @@ static void openAirInit(void) {
   ag->button.begin();
   ag->statusLed.begin();
 
-  /** detect sensor: PMS5003, PMS5003T, SGP41 and S8 */
-  /**
-   * Serial1 and Serial0 is use for connect S8 and PM sensor or both PM
-   */
+
+
+
+
   bool serial1Available = true;
   bool serial0Available = true;
 
@@ -724,7 +697,7 @@ static void openAirInit(void) {
     Serial1.end();
     delay(200);
     Serial.println("Can not detect S8 on Serial1, try on Serial0");
-    /** Check on other port */
+
     if (ag->s8.begin(Serial0) == false) {
       configuration.hasSensorS8 = false;
 
@@ -755,7 +728,7 @@ static void openAirInit(void) {
     }
   }
 
-  /** Attempt to detect PM sensors */
+
   if (fwMode == FW_MODE_O_1PST) {
     bool pmInitSuccess = false;
     if (serial0Available) {
@@ -779,7 +752,7 @@ static void openAirInit(void) {
         }
       }
     }
-    configuration.hasSensorPMS2 = false; // Disable PM2
+    configuration.hasSensorPMS2 = false;
   } else {
     if (ag->pms5003t_1.begin(Serial0) == false) {
       configuration.hasSensorPMS1 = false;
@@ -903,18 +876,18 @@ static void configUpdateHandle() {
     stateMachine.executeLedBarTest();
   }
 
-  // Update display and led bar notification based on updated configuration
+
   updateDisplayAndLedBar();
 }
 
 static void updateDisplayAndLedBar(void) {
   if (factoryBtnPressTime != 0) {
-    // Do not distrub factory reset sequence countdown
+
     return;
   }
 
   if (configuration.isOfflineMode()) {
-    // Ignore network related status when in offline mode
+
     stateMachine.displayHandle(AgStateMachineNormal);
     stateMachine.handleLeds(AgStateMachineNormal);
     return;
@@ -1080,7 +1053,7 @@ static void updatePm(void) {
 
     if (configuration.hasSensorPMS1 && configuration.hasSensorPMS2 &&
         pmsResult_1 && pmsResult_2) {
-      /** Get total of PMS1*/
+
       measurements.pm1Value01 = measurements.pm1Value01 + measurements.pm01_1;
       measurements.pm1Value25 = measurements.pm1Value25 + measurements.pm25_1;
       measurements.pm1Value10 = measurements.pm1Value10 + measurements.pm10_1;
@@ -1089,7 +1062,7 @@ static void updatePm(void) {
       measurements.pm1temp = measurements.pm1temp + measurements.temp_1;
       measurements.pm1hum = measurements.pm1hum + measurements.hum_1;
 
-      /** Get total of PMS2 */
+
       measurements.pm2Value01 = measurements.pm2Value01 + measurements.pm01_2;
       measurements.pm2Value25 = measurements.pm2Value25 + measurements.pm25_2;
       measurements.pm2Value10 = measurements.pm2Value10 + measurements.pm10_2;
@@ -1100,7 +1073,7 @@ static void updatePm(void) {
 
       measurements.countPosition++;
 
-      /** Get average */
+
       if (measurements.countPosition == measurements.targetCount) {
         measurements.pm01_1 =
             measurements.pm1Value01 / measurements.targetCount;
@@ -1184,7 +1157,7 @@ static void updatePm(void) {
 }
 
 static void sendDataToServer(void) {
-  /** Ignore send data to server if postToAirGradient disabled */
+
   if (configuration.isPostDataToAirGradient() == false ||
       configuration.isOfflineMode()) {
     return;
@@ -1214,7 +1187,7 @@ static void tempHumUpdate(void) {
     Serial.printf("Relative Humidity compensated: %d\r\n",
                   measurements.Humidity);
 
-    // Update compensation temperature and humidity for SGP41
+
     if (configuration.hasSensorSGP) {
       ag->sgp41.setCompensationTemperatureHumidity(measurements.Temperature,
                                                    measurements.Humidity);
@@ -1229,7 +1202,7 @@ static void tempHumUpdate(void) {
 static void updateFidas(void) {
   fidasSensor.handle();
 
-  // Retrieve the values and print them
+
   measurements.Temperature = fidasSensor.getTemperature();
   measurements.Humidity = fidasSensor.getHumidity();
   measurements.pm25_1 = fidasSensor.getPM25();
@@ -1249,14 +1222,6 @@ static void sendDataToUdp(void) {
   udpData.pm10 = measurements.pm10_1;
   udpData.wifi_rssi = wifiConnector.RSSI();
   udpData.timestamp = millis();
-
-  // Debug: Show data before sending
-  Serial.println("🔍 === UDP Data Before Transmission ===");
-  Serial.printf("   Raw PM2.5: %.2f (from measurements.pm25_1)\n", measurements.pm25_1);
-  Serial.printf("   Raw PM10:  %.2f (from measurements.pm10_1)\n", measurements.pm10_1);
-  Serial.printf("   Raw RSSI:  %d (from wifiConnector.RSSI())\n", wifiConnector.RSSI());
-  Serial.printf("   Raw millis: %lu (will be replaced by NTP)\n", millis());
-  Serial.println("📡 Calling udpSender.sendData()...\n");
 
   udpSender.sendData(udpData);
 }

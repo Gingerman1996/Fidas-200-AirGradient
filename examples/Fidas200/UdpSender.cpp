@@ -82,6 +82,38 @@ bool UdpSender::sendData(udp_pm_data_t myData) {
   
   Serial.printf("   📦 Data size: %d bytes\n", sizeof(myData));
   Serial.printf("   🎯 Target: %s:%d\n", _targetIP.c_str(), _targetPort);
+  
+  // Print raw data in hex format
+  Serial.println("📋 === Raw Data (Hex) ===");
+  uint8_t* rawData = (uint8_t*)&myData;
+  for (int i = 0; i < sizeof(myData); i++) {
+    Serial.printf("%02X ", rawData[i]);
+    if ((i + 1) % 16 == 0) Serial.println(); // New line every 16 bytes
+  }
+  if (sizeof(myData) % 16 != 0) Serial.println(); // Final new line if needed
+  
+  // Print raw data structure breakdown
+  Serial.println("📋 === Raw Data Structure ===");
+  Serial.printf("   PM2.5 bytes:    ");
+  uint8_t* pm02_bytes = (uint8_t*)&myData.pm02;
+  for (int i = 0; i < 4; i++) Serial.printf("%02X ", pm02_bytes[i]);
+  Serial.println();
+  
+  Serial.printf("   PM10 bytes:     ");
+  uint8_t* pm10_bytes = (uint8_t*)&myData.pm10;
+  for (int i = 0; i < 4; i++) Serial.printf("%02X ", pm10_bytes[i]);
+  Serial.println();
+  
+  Serial.printf("   RSSI bytes:     ");
+  uint8_t* rssi_bytes = (uint8_t*)&myData.wifi_rssi;
+  for (int i = 0; i < 4; i++) Serial.printf("%02X ", rssi_bytes[i]);
+  Serial.println();
+  
+  Serial.printf("   Timestamp bytes: ");
+  uint8_t* timestamp_bytes = (uint8_t*)&myData.timestamp;
+  for (int i = 0; i < 4; i++) Serial.printf("%02X ", timestamp_bytes[i]);
+  Serial.println();
+  
   Serial.println("=====================================");
 
   // Send UDP packet
@@ -95,6 +127,15 @@ bool UdpSender::sendData(udp_pm_data_t myData) {
     } else {
       Serial.println("📡 Sent successfully to target");
     }
+    
+    // Confirm what was actually sent
+    Serial.printf("✅ Confirmed sent %d bytes:\n", bytesWritten);
+    Serial.printf("   PM2.5: %.2f µg/m³ (0x%08X)\n", myData.pm02, *(uint32_t*)&myData.pm02);
+    Serial.printf("   PM10:  %.2f µg/m³ (0x%08X)\n", myData.pm10, *(uint32_t*)&myData.pm10);
+    Serial.printf("   RSSI:  %d dBm (0x%08X)\n", myData.wifi_rssi, *(uint32_t*)&myData.wifi_rssi);
+    Serial.printf("   Time:  %lu unix (0x%08X)\n", myData.timestamp, myData.timestamp);
+    Serial.println("🎯 === End of UDP transmission ===\n");
+    
     return true;
   } else {
     Serial.printf("❌ Error sending UDP data (wrote %d bytes, success: %s)\n", 
