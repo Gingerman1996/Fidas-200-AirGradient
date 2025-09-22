@@ -38,6 +38,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 
 #include <HardwareSerial.h>
 #include "AirGradient.h"
+#include "OtaHandler.h"
 #include "AgApiClient.h"
 #include "AgConfigure.h"
 #include "AgSchedule.h"
@@ -50,14 +51,14 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "OpenMetrics.h"
 #include "WebServer.h"
 #include <SensirionI2cSen66.h>
+#include <SensirionErrors.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <math.h>
 
-#ifdef NO_ERROR
-#undef NO_ERROR
-#endif
+#ifndef NO_ERROR
 #define NO_ERROR 0
+#endif
 
 #define LED_BAR_ANIMATION_PERIOD 100         /** ms */
 #define DISP_UPDATE_INTERVAL 2500            /** ms */
@@ -65,7 +66,12 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #define SERVER_SYNC_INTERVAL 60000           /** ms */
 #define MQTT_SYNC_INTERVAL 60000             /** ms */
 #define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5     /** sec */
+#define SENSOR_TVOC_UPDATE_INTERVAL 1000     /** ms */
+#define SENSOR_CO2_UPDATE_INTERVAL 4000      /** ms */
+#define SENSOR_PM_UPDATE_INTERVAL 2000       /** ms */
+#define SENSOR_TEMP_HUM_UPDATE_INTERVAL 2000 /** ms */
 #define DISPLAY_DELAY_SHOW_CONTENT_MS 2000   /** ms */
+#define FIRMWARE_CHECK_FOR_UPDATE_MS (60*60*1000)   /** ms */
 #define SEN66_READ_INTERVAL_MS 1000          /** ms */
 #define SEN66_LOG_INTERVAL_MS 2000           /** ms */
 
@@ -87,6 +93,7 @@ static WifiConnector wifiConnector(oledDisplay, Serial, stateMachine,
                                    configuration);
 static OpenMetrics openMetrics(measurements, configuration, wifiConnector,
                                apiClient);
+static OtaHandler otaHandler;
 static LocalServer localServer(Serial, openMetrics, measurements, configuration,
                                wifiConnector);
 
@@ -95,7 +102,7 @@ static int getCO2FailCount = 0;
 static AgFirmwareMode fwMode = FW_MODE_I_9PSL;
 
 static bool ledBarButtonTest = false;
-
+static String fwNewVersion;
 static SensirionI2cSen66 sen66;
 
 struct Sen66Sample {
@@ -133,12 +140,18 @@ static void initMqtt(void);
 static void factoryConfigReset(void);
 static void wdgFeedUpdate(void);
 static void ledBarEnabledUpdate(void);
+static void firmwareCheckForUpdate(void);
+static void otaHandlerCallback(OtaState state, String mesasge);
+static void displayExecuteOta(OtaState state, String msg,
+                              int processing);
+
 AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, updateDisplayAndLedBar);
 AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
                           configurationUpdateSchedule);
 AgSchedule agApiPostSchedule(SERVER_SYNC_INTERVAL, sendDataToServer);
 AgSchedule sen66Schedule(SEN66_READ_INTERVAL_MS, sen66Update);
 AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
+AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS, firmwareCheckForUpdate);
 
 void setup() {
   /** Serial for print debug message */
@@ -184,6 +197,7 @@ void setup() {
 
   /** Init sensor */
   boardInit();
+  sen66Schedule.update();
 
   /** Connecting wifi */
   bool connectToWifi = false;
@@ -227,6 +241,13 @@ void setup() {
         localServer.begin();
         initMqtt();
         sendDataToAg();
+
+        #ifdef ESP8266
+          // ota not supported
+        #else
+          firmwareCheckForUpdate();
+          checkForUpdateSchedule.update();
+        #endif
 
         apiClient.fetchServerConfiguration();
         configSchedule.update();
@@ -280,7 +301,6 @@ void loop() {
   dispLedSchedule.run();
   configSchedule.run();
   agApiPostSchedule.run();
-
   sen66Schedule.run();
 
   watchdogFeedSchedule.run();
@@ -294,6 +314,8 @@ void loop() {
   /** check that local configura changed then do some action */
   configUpdateHandle();
 
+  /** Firmware check for update handle */
+  checkForUpdateSchedule.run();
 }
 
 static void mdnsInit(void) {
@@ -447,6 +469,116 @@ static void ledBarEnabledUpdate(void) {
   }
 }
 
+static void firmwareCheckForUpdate(void) {
+  Serial.println();
+  Serial.println("firmwareCheckForUpdate:");
+
+  if (wifiConnector.isConnected()) {
+    Serial.println("firmwareCheckForUpdate: Perform");
+    otaHandler.setHandlerCallback(otaHandlerCallback);
+    otaHandler.updateFirmwareIfOutdated(ag->deviceId());
+  } else {
+    Serial.println("firmwareCheckForUpdate: Ignored");
+  }
+  Serial.println();
+}
+
+static void otaHandlerCallback(OtaState state, String mesasge) {
+  Serial.println("OTA message: " + mesasge);
+  switch (state) {
+  case OtaState::OTA_STATE_BEGIN:
+    displayExecuteOta(state, fwNewVersion, 0);
+    break;
+  case OtaState::OTA_STATE_FAIL:
+    displayExecuteOta(state, "", 0);
+    break;
+  case OtaState::OTA_STATE_PROCESSING:
+    displayExecuteOta(state, "", mesasge.toInt());
+    break;
+  case OtaState::OTA_STATE_SUCCESS:
+    displayExecuteOta(state, "", mesasge.toInt());
+    break;
+  default:
+    break;
+  }
+}
+
+static void displayExecuteOta(OtaState state, String msg, int processing) {
+  switch (state) {
+  case OtaState::OTA_STATE_BEGIN: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateVersion(msg);
+    } else {
+      Serial.println("New firmware: " + msg);
+    }
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_FAIL: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateFailed();
+    } else {
+      Serial.println("Error: Firmware update: failed");
+    }
+
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_SKIP: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateSkipped();
+    } else {
+      Serial.println("Firmware update: Skipped");
+    }
+
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_UP_TO_DATE: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateUpToDate();
+    } else {
+      Serial.println("Firmware update: up to date");
+    }
+
+    delay(2500);
+    break;
+  }
+  case OtaState::OTA_STATE_PROCESSING: {
+    if (ag->isOne()) {
+      oledDisplay.showFirmwareUpdateProgress(processing);
+    } else {
+      Serial.println("Firmware update: " + String(processing) + String("%"));
+    }
+
+    break;
+  }
+  case OtaState::OTA_STATE_SUCCESS: {
+    int i = 6;
+    while(i != 0) {
+      i = i - 1;
+      Serial.println("OTA update performed, restarting ...");
+      int i = 6;
+      while (i != 0) {
+        i = i - 1;
+        if (ag->isOne()) {
+          oledDisplay.showFirmwareUpdateSuccess(i);
+        } else {
+          Serial.println("Rebooting... " + String(i));
+        }
+        
+        delay(1000);
+      }
+      oledDisplay.setBrightness(0);
+      esp_restart();
+    }
+    break;
+  }
+  default:
+    break;
+  }
+}
+
 static void sendDataToAg() {
   /** Change oledDisplay and led state */
   if (ag->isOne()) {
@@ -545,11 +677,10 @@ static void oneIndoorInit(void) {
   oledDisplay.setText("Monitor", "initializing...", "");
 
   if (!sen66Init()) {
-    Serial.println("SEN66 sensor not found");
     configuration.hasSensorPMS1 = false;
     configuration.hasSensorS8 = false;
-    configuration.hasSensorSHT = false;
     configuration.hasSensorSGP = false;
+    configuration.hasSensorSHT = false;
     dispSensorNotFound("SEN66");
   }
 }
@@ -568,11 +699,11 @@ static void openAirInit(void) {
   ag->statusLed.begin();
 
   if (!sen66Init()) {
-    Serial.println("SEN66 sensor not found");
     configuration.hasSensorPMS1 = false;
     configuration.hasSensorS8 = false;
-    configuration.hasSensorSHT = false;
     configuration.hasSensorSGP = false;
+    configuration.hasSensorSHT = false;
+    Serial.println("SEN66 sensor not found");
     dispSensorNotFound("SEN66");
   }
 
@@ -607,7 +738,9 @@ static void configUpdateHandle() {
     return;
   }
 
-  stateMachine.executeCo2Calibration();
+  if (configuration.isCo2CalibrationRequested()) {
+    Serial.println("CO2 calibration request ignored for SEN66 integration");
+  }
 
   String mqttUri = configuration.getMqttBrokerUri();
   if (mqttClient.isCurrentUri(mqttUri) == false) {
@@ -696,8 +829,8 @@ static bool sen66Init(void) {
 
   int16_t err = sen66.deviceReset();
   if (err != NO_ERROR) {
-    errorToString(err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
-    Serial.print("Error: deviceReset() -> ");
+    errorToString((uint16_t)err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 deviceReset failed: ");
     Serial.println(sen66ErrorMessage);
     return false;
   }
@@ -706,8 +839,8 @@ static bool sen66Init(void) {
 
   err = sen66.startContinuousMeasurement();
   if (err != NO_ERROR) {
-    errorToString(err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
-    Serial.print("Error: startContinuousMeasurement() -> ");
+    errorToString((uint16_t)err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 startContinuousMeasurement failed: ");
     Serial.println(sen66ErrorMessage);
     return false;
   }
@@ -716,11 +849,6 @@ static bool sen66Init(void) {
   sen66Sample.valid = false;
   lastSen66Read = 0;
   lastSen66Log = 0;
-
-  configuration.hasSensorPMS1 = true;
-  configuration.hasSensorS8 = true;
-  configuration.hasSensorSHT = true;
-  configuration.hasSensorSGP = true;
 
   Serial.println("SEN66 ready");
   return true;
@@ -733,8 +861,7 @@ static bool ensureSen66Sample(bool forceRead) {
 
   uint32_t now = millis();
   if (!forceRead && sen66Sample.valid) {
-    uint32_t elapsed = now - lastSen66Read;
-    if (elapsed < SEN66_READ_INTERVAL_MS) {
+    if ((now - lastSen66Read) < SEN66_READ_INTERVAL_MS) {
       return true;
     }
   }
@@ -749,19 +876,18 @@ static bool ensureSen66Sample(bool forceRead) {
   float noxIndex = NAN;
   uint16_t co2 = 0;
 
-  int16_t err = sen66.readMeasuredValues(
-      massConcentrationPm1p0,
-      massConcentrationPm2p5,
-      massConcentrationPm4p0,
-      massConcentrationPm10p0,
-      relativeHumidity,
-      ambientTemperature,
-      vocIndex,
-      noxIndex,
-      co2);
+  int16_t err = sen66.readMeasuredValues(massConcentrationPm1p0,
+                                         massConcentrationPm2p5,
+                                         massConcentrationPm4p0,
+                                         massConcentrationPm10p0,
+                                         relativeHumidity,
+                                         ambientTemperature,
+                                         vocIndex,
+                                         noxIndex,
+                                         co2);
   if (err != NO_ERROR) {
-    errorToString(err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
-    Serial.print("Error: readMeasuredValues() -> ");
+    errorToString((uint16_t)err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 readMeasuredValues failed: ");
     Serial.println(sen66ErrorMessage);
     sen66Sample.valid = false;
     return false;
@@ -789,7 +915,7 @@ static void logSen66Sample(void) {
   }
 
   uint32_t now = millis();
-  if (now - lastSen66Log < SEN66_LOG_INTERVAL_MS) {
+  if ((now - lastSen66Log) < SEN66_LOG_INTERVAL_MS) {
     return;
   }
 
@@ -814,14 +940,20 @@ static void sen66Update(void) {
     measurements.pm25_1 = utils::getInvalidPmValue();
     measurements.pm10_1 = utils::getInvalidPmValue();
     measurements.pm03PCount_1 = utils::getInvalidPmValue();
+
     measurements.pm01_2 = utils::getInvalidPmValue();
     measurements.pm25_2 = utils::getInvalidPmValue();
     measurements.pm10_2 = utils::getInvalidPmValue();
     measurements.pm03PCount_2 = utils::getInvalidPmValue();
+
     measurements.Temperature = utils::getInvalidTemperature();
-    measurements.Humidity = utils::getInvalidHumidity();
     measurements.temp_1 = utils::getInvalidTemperature();
+    measurements.temp_2 = utils::getInvalidTemperature();
+
+    measurements.Humidity = utils::getInvalidHumidity();
     measurements.hum_1 = utils::getInvalidHumidity();
+    measurements.hum_2 = utils::getInvalidHumidity();
+
     measurements.TVOC = utils::getInvalidVOC();
     measurements.TVOCRaw = -1;
     measurements.NOx = utils::getInvalidNOx();
@@ -834,7 +966,7 @@ static void sen66Update(void) {
     if (isnan(value)) {
       return utils::getInvalidPmValue();
     }
-    return (int)lroundf(value);
+    return static_cast<int>(lroundf(value));
   };
 
   measurements.pm01_1 = pmOrInvalid(sen66Sample.pm1);
@@ -854,28 +986,30 @@ static void sen66Update(void) {
     measurements.Temperature = utils::getInvalidTemperature();
     measurements.temp_1 = utils::getInvalidTemperature();
   }
+  measurements.temp_2 = utils::getInvalidTemperature();
 
   if (!isnan(sen66Sample.humidity)) {
-    measurements.Humidity = lroundf(sen66Sample.humidity);
+    measurements.Humidity = static_cast<int>(lroundf(sen66Sample.humidity));
     measurements.hum_1 = measurements.Humidity;
   } else {
     measurements.Humidity = utils::getInvalidHumidity();
     measurements.hum_1 = utils::getInvalidHumidity();
   }
+  measurements.hum_2 = utils::getInvalidHumidity();
 
   measurements.TVOC = isnan(sen66Sample.vocIndex) ? utils::getInvalidVOC()
-                                                  : lroundf(sen66Sample.vocIndex);
+                                                  : static_cast<int>(lroundf(sen66Sample.vocIndex));
   measurements.TVOCRaw = -1;
   measurements.NOx = isnan(sen66Sample.noxIndex) ? utils::getInvalidNOx()
-                                                 : lroundf(sen66Sample.noxIndex);
+                                                 : static_cast<int>(lroundf(sen66Sample.noxIndex));
   measurements.NOxRaw = -1;
 
-  if (utils::isValidCO2(sen66Sample.co2)) {
+  if (utils::isValidCO2(static_cast<int>(sen66Sample.co2))) {
     measurements.CO2 = sen66Sample.co2;
     getCO2FailCount = 0;
   } else {
     getCO2FailCount++;
-    Serial.printf("SEN66 CO2 read failed %d\r\n", getCO2FailCount);
+    Serial.printf("SEN66 CO2 read invalid %d\r\n", getCO2FailCount);
     if (getCO2FailCount >= 3) {
       measurements.CO2 = utils::getInvalidCO2();
     }
