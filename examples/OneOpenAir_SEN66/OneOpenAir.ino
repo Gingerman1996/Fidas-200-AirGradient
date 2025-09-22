@@ -110,6 +110,12 @@ struct Sen66Sample {
   float pm25 = NAN;
   float pm4 = NAN;
   float pm10 = NAN;
+  float numberPm0p5 = NAN;
+  float numberPm1 = NAN;
+  float numberPm2p5 = NAN;
+  float numberPm4 = NAN;
+  float numberPm10 = NAN;
+  float numberSum = NAN;
   float humidity = NAN;
   float temperature = NAN;
   float vocIndex = NAN;
@@ -870,6 +876,11 @@ static bool ensureSen66Sample(bool forceRead) {
   float massConcentrationPm2p5 = NAN;
   float massConcentrationPm4p0 = NAN;
   float massConcentrationPm10p0 = NAN;
+  float numberPm0p5 = NAN;
+  float numberPm1p0 = NAN;
+  float numberPm2p5 = NAN;
+  float numberPm4p0 = NAN;
+  float numberPm10p0 = NAN;
   float relativeHumidity = NAN;
   float ambientTemperature = NAN;
   float vocIndex = NAN;
@@ -893,10 +904,40 @@ static bool ensureSen66Sample(bool forceRead) {
     return false;
   }
 
+  err = sen66.readNumberConcentrationValues(numberPm0p5,
+                                            numberPm1p0,
+                                            numberPm2p5,
+                                            numberPm4p0,
+                                            numberPm10p0);
+  if (err != NO_ERROR) {
+    errorToString((uint16_t)err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 readNumberConcentrationValues failed: ");
+    Serial.println(sen66ErrorMessage);
+    numberPm0p5 = NAN;
+    numberPm1p0 = NAN;
+    numberPm2p5 = NAN;
+    numberPm4p0 = NAN;
+    numberPm10p0 = NAN;
+  }
+
+  bool numberValid = !(isnan(numberPm0p5) || isnan(numberPm1p0) ||
+                       isnan(numberPm2p5) || isnan(numberPm4p0) ||
+                       isnan(numberPm10p0));
+  float numberSum = numberValid
+                        ? (numberPm0p5 + numberPm1p0 + numberPm2p5 +
+                           numberPm4p0 + numberPm10p0)
+                        : NAN;
+
   sen66Sample.pm1 = massConcentrationPm1p0;
   sen66Sample.pm25 = massConcentrationPm2p5;
   sen66Sample.pm4 = massConcentrationPm4p0;
   sen66Sample.pm10 = massConcentrationPm10p0;
+  sen66Sample.numberPm0p5 = numberPm0p5;
+  sen66Sample.numberPm1 = numberPm1p0;
+  sen66Sample.numberPm2p5 = numberPm2p5;
+  sen66Sample.numberPm4 = numberPm4p0;
+  sen66Sample.numberPm10 = numberPm10p0;
+  sen66Sample.numberSum = numberSum;
   sen66Sample.humidity = relativeHumidity;
   sen66Sample.temperature = ambientTemperature;
   sen66Sample.vocIndex = vocIndex;
@@ -927,6 +968,14 @@ static void logSen66Sample(void) {
   Serial.printf("PM2.5 ug/m3: %.1f\r\n", sen66Sample.pm25);
   Serial.printf("PM4.0 ug/m3: %.1f\r\n", sen66Sample.pm4);
   Serial.printf("PM10 ug/m3: %.1f\r\n", sen66Sample.pm10);
+  Serial.printf("#0.5 um: %.1f/cm3\r\n", sen66Sample.numberPm0p5);
+  Serial.printf("#1.0 um: %.1f/cm3\r\n", sen66Sample.numberPm1);
+  Serial.printf("#2.5 um: %.1f/cm3\r\n", sen66Sample.numberPm2p5);
+  Serial.printf("#4.0 um: %.1f/cm3\r\n", sen66Sample.numberPm4);
+  Serial.printf("#10 um: %.1f/cm3\r\n", sen66Sample.numberPm10);
+  if (!isnan(sen66Sample.numberSum)) {
+    Serial.printf("#0.5-10 um sum: %.1f/cm3\r\n", sen66Sample.numberSum);
+  }
   Serial.printf("Temperature C: %.2f\r\n", sen66Sample.temperature);
   Serial.printf("Humidity %%: %.1f\r\n", sen66Sample.humidity);
   Serial.printf("TVOC index: %.1f\r\n", sen66Sample.vocIndex);
@@ -972,7 +1021,11 @@ static void sen66Update(void) {
   measurements.pm01_1 = pmOrInvalid(sen66Sample.pm1);
   measurements.pm25_1 = pmOrInvalid(sen66Sample.pm25);
   measurements.pm10_1 = pmOrInvalid(sen66Sample.pm10);
-  measurements.pm03PCount_1 = utils::getInvalidPmValue();
+  if (!isnan(sen66Sample.numberSum)) {
+    measurements.pm03PCount_1 = static_cast<int>(lroundf(sen66Sample.numberSum));
+  } else {
+    measurements.pm03PCount_1 = utils::getInvalidPmValue();
+  }
 
   measurements.pm01_2 = utils::getInvalidPmValue();
   measurements.pm25_2 = utils::getInvalidPmValue();

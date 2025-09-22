@@ -39,8 +39,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include <HardwareSerial.h>
 #include <WebServer.h>
 #include <WiFi.h>
-#include <esp_now.h>
-#include <esp_wifi.h>
+#include <WiFiUdp.h>
 
 #include "AgApiClient.h"
 #include "AgConfigure.h"
@@ -55,7 +54,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "OpenMetrics.h"
 #include "OtaHandler.h"
 #include "WebServer.h"
-#include "ESPNowSender.h"
+#include "UdpSender.h"
 
 #define LED_BAR_ANIMATION_PERIOD 100                  /** ms */
 #define DISP_UPDATE_INTERVAL 2500                     /** ms */
@@ -70,14 +69,16 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #define DISPLAY_DELAY_SHOW_CONTENT_MS 2000            /** ms */
 #define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000) /** ms */
 
-#define ESP_NOW_INTERVAL 2000
+#define UDP_SEND_INTERVAL 2000
 
 /** I2C define */
 #define I2C_SDA_PIN 7
 #define I2C_SCL_PIN 6
 #define OLED_I2C_ADDR 0x3C
 
-uint8_t controllerMac[] = {0x94, 0xE6, 0x86, 0x8D, 0x45, 0xB0}; // Replace with actual controller MAC
+// UDP Configuration
+#define UDP_TARGET_IP "192.168.100.255"  // Broadcast IP - adjust according to your network
+#define UDP_PORT 8888
 
 static MqttClient mqttClient(Serial);
 static TaskHandle_t mqttTask = NULL;
@@ -123,7 +124,7 @@ static void firmwareCheckForUpdate(void);
 static void otaHandlerCallback(OtaState state, String mesasge);
 static void displayExecuteOta(OtaState state, String msg, int processing);
 static void updateFidas(void);
-static void sendDataToEspNow(void);
+static void sendDataToUdp(void);
 
 AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, updateDisplayAndLedBar);
 AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
@@ -134,14 +135,12 @@ AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
 AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS,
                                   firmwareCheckForUpdate);
 AgSchedule FidasSchedule(SENSOR_PM_UPDATE_INTERVAL, updateFidas);
-AgSchedule espnowSchedule(ESP_NOW_INTERVAL, sendDataToEspNow);
+AgSchedule udpSchedule(UDP_SEND_INTERVAL, sendDataToUdp);
 
 Fidas200Sensor fidasSensor(&Serial0);
-ESPNowSender espNowSender(controllerMac);
+UdpSender udpSender(UDP_PORT); // Use broadcast mode
 
-
-
-esp_now_pm_data_t espNowData = {0};
+udp_pm_data_t udpData = {0};
 
 void setup() {
   /** Serial for print debug message */
@@ -223,9 +222,8 @@ void setup() {
 
     if (wifiConnector.connect()) {
       if (wifiConnector.isConnected()) {
-        // Set WiFi channel to 11 for ESP-NOW
-        esp_wifi_set_channel(11, WIFI_SECOND_CHAN_NONE);
-        Serial.println("WiFi channel set to 11");
+        // WiFi channel setting no longer needed for UDP communication
+        Serial.println("WiFi connected - UDP communication ready on any channel");
 
         mdnsInit();
         localServer.begin();
@@ -258,11 +256,11 @@ void setup() {
           ledBarEnabledUpdate();
         }
 
-        espNowSender.begin();
+        udpSender.begin();
         
         // Initialize NTP after WiFi connection is established
         if (WiFi.status() == WL_CONNECTED) {
-          espNowSender.initNTP();
+          udpSender.initNTP();
         }
         
       } else {
@@ -307,7 +305,7 @@ void loop() {
 
   /** Check for handle WiFi reconnect */
   wifiConnector.handle();
-  espnowSchedule.run();
+  udpSchedule.run();
 
   /** factory reset handle */
   factoryConfigReset();
@@ -1246,11 +1244,11 @@ static void updateFidas(void) {
       measurements.pm01_1, measurements.pm10_1, measurements.pm03PCount_1);
 }
 
-static void sendDataToEspNow(void) {
-  espNowData.pm02 = measurements.pm25_1;
-  espNowData.pm10 = measurements.pm10_1;
-  espNowData.wifi_rssi = wifiConnector.RSSI();
-  espNowData.timestamp = millis();
+static void sendDataToUdp(void) {
+  udpData.pm02 = measurements.pm25_1;
+  udpData.pm10 = measurements.pm10_1;
+  udpData.wifi_rssi = wifiConnector.RSSI();
+  udpData.timestamp = millis();
 
-  espNowSender.sendData(espNowData);
+  udpSender.sendData(udpData);
 }

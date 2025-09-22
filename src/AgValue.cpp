@@ -54,18 +54,19 @@ String Measurements::toString(bool localServer, AgFirmwareMode fwMode, int rssi,
 
   if (ag->isOne() || (ag->isPro4_2()) || ag->isPro3_3() || ag->isBasic()) {
     if (config->hasSensorPMS1) {
-      if (utils::isValidPm(this->pm01_1)) {
-        root["pm01"] = this->pm01_1;
-      }
-      if (utils::isValidPm(this->pm25_1)) {
-        root["pm02"] = this->pm25_1;
-      }
-      if (utils::isValidPm(this->pm10_1)) {
-        root["pm10"] = this->pm10_1;
-      }
-      if (utils::isValidPm03Count(this->pm03PCount_1)) {
-        root["pm003Count"] = this->pm03PCount_1;
-      }
+    if (utils::isValidPm(this->pm01_1)) {
+      root["pm01"] = this->pm01_1;
+    }
+    if (utils::isValidPm(this->pm25_1)) {
+      root["pm02"] = this->pm25_1;
+    }
+    if (utils::isValidPm(this->pm10_1)) {
+      root["pm10"] = this->pm10_1;
+    }
+    if (utils::isValidPm03Count(this->pm03PCount_1)) {
+      int particleSum = this->pm03PCount_1;
+      root["pm003Count"] = particleSum;
+    }
       if (!localServer) {
 
         root[json_prop_pmFirmware] =
