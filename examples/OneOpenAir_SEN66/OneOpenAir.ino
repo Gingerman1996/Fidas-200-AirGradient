@@ -1,0 +1,902 @@
+/*
+This is the combined firmware code for AirGradient ONE and AirGradient Open Air
+open-source hardware Air Quality Monitor with ESP32-C3 Microcontroller.
+
+It is an air quality monitor for PM2.5, CO2, TVOCs, NOx, Temperature and
+Humidity with a small display, an RGB led bar and can send data over Wifi.
+
+// Open source air quality monitors and kits are available:
+Indoor Monitor: https://www.airgradient.com/indoor/
+Outdoor Monitor: https://www.airgradient.com/outdoor/
+
+Build Instructions: AirGradient ONE:
+https://www.airgradient.com/documentation/one-v9/ Build Instructions:
+AirGradient Open Air:
+https://www.airgradient.com/documentation/open-air-pst-kit-1-3/
+
+Please make sure you have esp32 board manager installed. Tested with
+version 2.0.11.
+
+Important flashing settings:
+- Set board to "ESP32C3 Dev Module"
+- Enable "USB CDC On Boot"
+- Flash frequency "80Mhz"
+- Flash mode "QIO"
+- Flash size "4MB"
+- Partition scheme "Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)"
+- JTAG adapter "Disabled"
+
+Configuration parameters, e.g. Celsius / Fahrenheit or PM unit (US AQI vs ug/m3)
+can be set through the AirGradient dashboard.
+
+If you have any questions please visit our forum at
+https://forum.airgradient.com/
+
+CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
+
+*/
+
+#include <HardwareSerial.h>
+#include "AirGradient.h"
+#include "AgApiClient.h"
+#include "AgConfigure.h"
+#include "AgSchedule.h"
+#include "AgStateMachine.h"
+#include "AgWiFiConnector.h"
+#include "EEPROM.h"
+#include "ESPmDNS.h"
+#include "LocalServer.h"
+#include "MqttClient.h"
+#include "OpenMetrics.h"
+#include "WebServer.h"
+#include <SensirionI2cSen66.h>
+#include <WebServer.h>
+#include <WiFi.h>
+#include <math.h>
+
+#ifdef NO_ERROR
+#undef NO_ERROR
+#endif
+#define NO_ERROR 0
+
+#define LED_BAR_ANIMATION_PERIOD 100         /** ms */
+#define DISP_UPDATE_INTERVAL 2500            /** ms */
+#define SERVER_CONFIG_SYNC_INTERVAL 60000    /** ms */
+#define SERVER_SYNC_INTERVAL 60000           /** ms */
+#define MQTT_SYNC_INTERVAL 60000             /** ms */
+#define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5     /** sec */
+#define DISPLAY_DELAY_SHOW_CONTENT_MS 2000   /** ms */
+#define SEN66_READ_INTERVAL_MS 1000          /** ms */
+#define SEN66_LOG_INTERVAL_MS 2000           /** ms */
+
+/** I2C define */
+#define I2C_SDA_PIN 7
+#define I2C_SCL_PIN 6
+#define OLED_I2C_ADDR 0x3C
+
+static MqttClient mqttClient(Serial);
+static TaskHandle_t mqttTask = NULL;
+static Configuration configuration(Serial);
+static AgApiClient apiClient(Serial, configuration);
+static Measurements measurements;
+static AirGradient *ag;
+static OledDisplay oledDisplay(configuration, measurements, Serial);
+static StateMachine stateMachine(oledDisplay, Serial, measurements,
+                                 configuration);
+static WifiConnector wifiConnector(oledDisplay, Serial, stateMachine,
+                                   configuration);
+static OpenMetrics openMetrics(measurements, configuration, wifiConnector,
+                               apiClient);
+static LocalServer localServer(Serial, openMetrics, measurements, configuration,
+                               wifiConnector);
+
+static uint32_t factoryBtnPressTime = 0;
+static int getCO2FailCount = 0;
+static AgFirmwareMode fwMode = FW_MODE_I_9PSL;
+
+static bool ledBarButtonTest = false;
+
+static SensirionI2cSen66 sen66;
+
+struct Sen66Sample {
+  float pm1 = NAN;
+  float pm25 = NAN;
+  float pm4 = NAN;
+  float pm10 = NAN;
+  float humidity = NAN;
+  float temperature = NAN;
+  float vocIndex = NAN;
+  float noxIndex = NAN;
+  uint16_t co2 = 0;
+  uint32_t timestamp = 0;
+  bool valid = false;
+};
+
+static Sen66Sample sen66Sample;
+static bool sen66Ready = false;
+static uint32_t lastSen66Log = 0;
+static uint32_t lastSen66Read = 0;
+static char sen66ErrorMessage[64];
+
+static void boardInit(void);
+static void failedHandler(String msg);
+static void configurationUpdateSchedule(void);
+static void updateDisplayAndLedBar(void);
+static void sendDataToServer(void);
+static void sen66Update(void);
+static bool ensureSen66Sample(bool forceRead);
+static bool sen66Init(void);
+static void logSen66Sample(void);
+static void mdnsInit(void);
+static void createMqttTask(void);
+static void initMqtt(void);
+static void factoryConfigReset(void);
+static void wdgFeedUpdate(void);
+static void ledBarEnabledUpdate(void);
+AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, updateDisplayAndLedBar);
+AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
+                          configurationUpdateSchedule);
+AgSchedule agApiPostSchedule(SERVER_SYNC_INTERVAL, sendDataToServer);
+AgSchedule sen66Schedule(SEN66_READ_INTERVAL_MS, sen66Update);
+AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
+
+void setup() {
+  /** Serial for print debug message */
+  Serial.begin(115200);
+  delay(100); /** For bester show log */
+
+  /** Print device ID into log */
+  Serial.println("Serial nr: " + ag->deviceId());
+
+  /** Initialize local configure */
+  configuration.begin();
+
+  configuration.hasSensorPMS1 = true;
+  configuration.hasSensorPMS2 = false;
+  configuration.hasSensorSGP = true;
+  configuration.hasSensorSHT = true;
+  configuration.hasSensorS8 = true;
+
+  /** Init I2C */
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  delay(1000);
+
+  /** Detect board type: ONE_INDOOR has OLED display, Scan the I2C address to
+   * identify board type */
+  Wire.beginTransmission(OLED_I2C_ADDR);
+  if (Wire.endTransmission() == 0x00) {
+    ag = new AirGradient(BoardType::ONE_INDOOR);
+  } else {
+    ag = new AirGradient(BoardType::OPEN_AIR_OUTDOOR);
+  }
+  Serial.println("Detected " + ag->getBoardName());
+
+  configuration.setAirGradient(ag);
+  oledDisplay.setAirGradient(ag);
+  stateMachine.setAirGradient(ag);
+  wifiConnector.setAirGradient(ag);
+  apiClient.setAirGradient(ag);
+  openMetrics.setAirGradient(ag);
+  localServer.setAirGraident(ag);
+
+  /** Example set custom API root URL */
+  // apiClient.setApiRoot("https://example.custom.api");
+
+  /** Init sensor */
+  boardInit();
+
+  /** Connecting wifi */
+  bool connectToWifi = false;
+  if (ag->isOne()) {
+    /** Show message confirm offline mode, should me perform if LED bar button
+     * test pressed */
+    if (ledBarButtonTest == false) {
+      oledDisplay.setText(
+          "Press now for",
+          configuration.isOfflineMode() ? "online mode" : "offline mode", "");
+      uint32_t startTime = millis();
+      while (true) {
+        if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
+          configuration.setOfflineMode(!configuration.isOfflineMode());
+
+          oledDisplay.setText(
+              "Offline Mode",
+              configuration.isOfflineMode() ? " = True" : "  = False", "");
+          delay(1000);
+          break;
+        }
+        uint32_t periodMs = (uint32_t)(millis() - startTime);
+        if (periodMs >= 3000) {
+          break;
+        }
+      }
+      connectToWifi = !configuration.isOfflineMode();
+    } else {
+      configuration.setOfflineModeWithoutSave(true);
+    }
+  } else {
+    connectToWifi = true;
+  }
+
+  if (connectToWifi) {
+    apiClient.begin();
+
+    if (wifiConnector.connect()) {
+      if (wifiConnector.isConnected()) {
+        mdnsInit();
+        localServer.begin();
+        initMqtt();
+        sendDataToAg();
+
+        apiClient.fetchServerConfiguration();
+        configSchedule.update();
+        if (apiClient.isFetchConfigureFailed()) {
+          if (ag->isOne()) {
+            if (apiClient.isNotAvailableOnDashboard()) {
+              stateMachine.displaySetAddToDashBoard();
+              stateMachine.displayHandle(
+                  AgStateMachineWiFiOkServerOkSensorConfigFailed);
+            } else {
+              stateMachine.displayClearAddToDashBoard();
+            }
+          }
+          stateMachine.handleLeds(
+              AgStateMachineWiFiOkServerOkSensorConfigFailed);
+          delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
+        } else {
+          ledBarEnabledUpdate();
+        }
+      } else {
+        if (wifiConnector.isConfigurePorttalTimeout()) {
+          oledDisplay.showRebooting();
+          delay(2500);
+          oledDisplay.setText("", "", "");
+          ESP.restart();
+        }
+      }
+    }
+  }
+  /** Set offline mode without saving, cause wifi is not configured */
+  if (wifiConnector.hasConfigurated() == false) {
+    Serial.println("Set offline mode cause wifi is not configurated");
+    configuration.setOfflineModeWithoutSave(true);
+  }
+
+  /** Show display Warning up */
+  if (ag->isOne()) {
+    oledDisplay.setText("Warming Up", "Serial Number:", ag->deviceId().c_str());
+    delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
+
+    Serial.println("Display brightness: " + String(configuration.getDisplayBrightness()));
+    oledDisplay.setBrightness(configuration.getDisplayBrightness());
+  }
+
+  // Update display and led bar after finishing setup to show dashboard
+  updateDisplayAndLedBar();
+}
+
+void loop() {
+  /** Handle schedule */
+  dispLedSchedule.run();
+  configSchedule.run();
+  agApiPostSchedule.run();
+
+  sen66Schedule.run();
+
+  watchdogFeedSchedule.run();
+
+  /** Check for handle WiFi reconnect */
+  wifiConnector.handle();
+
+  /** factory reset handle */
+  factoryConfigReset();
+
+  /** check that local configura changed then do some action */
+  configUpdateHandle();
+
+}
+
+static void mdnsInit(void) {
+  if (!MDNS.begin(localServer.getHostname().c_str())) {
+    Serial.println("Init mDNS failed");
+    return;
+  }
+
+  MDNS.addService("_airgradient", "_tcp", 80);
+  MDNS.addServiceTxt("_airgradient", "_tcp", "model",
+                     AgFirmwareModeName(fwMode));
+  MDNS.addServiceTxt("_airgradient", "_tcp", "serialno", ag->deviceId());
+  MDNS.addServiceTxt("_airgradient", "_tcp", "fw_ver", ag->getVersion());
+  MDNS.addServiceTxt("_airgradient", "_tcp", "vendor", "AirGradient");
+}
+
+static void createMqttTask(void) {
+  if (mqttTask) {
+    vTaskDelete(mqttTask);
+    mqttTask = NULL;
+    Serial.println("Delete old MQTT task");
+  }
+
+  Serial.println("Create new MQTT task");
+  xTaskCreate(
+      [](void *param) {
+        for (;;) {
+          delay(MQTT_SYNC_INTERVAL);
+
+          /** Send data */
+          if (mqttClient.isConnected()) {
+            String payload = measurements.toString(
+                true, fwMode, wifiConnector.RSSI(), ag, &configuration);
+            String topic = "airgradient/readings/" + ag->deviceId();
+
+            if (mqttClient.publish(topic.c_str(), payload.c_str(),
+                                   payload.length())) {
+              Serial.println("MQTT sync success");
+            } else {
+              Serial.println("MQTT sync failure");
+            }
+          }
+        }
+      },
+      "mqtt-task", 1024 * 4, NULL, 6, &mqttTask);
+
+  if (mqttTask == NULL) {
+    Serial.println("Creat mqttTask failed");
+  }
+}
+
+static void initMqtt(void) {
+  String mqttUri = configuration.getMqttBrokerUri();
+  if (mqttUri.isEmpty()) {
+    Serial.println(
+        "MQTT is not configured, skipping initialization of MQTT client");
+    return;
+  }
+
+  if (mqttClient.begin(mqttUri)) {
+    Serial.println("Successfully connected to MQTT broker");
+    createMqttTask();
+  } else {
+    Serial.println("Connection to MQTT broker failed");
+  }
+}
+
+static void factoryConfigReset(void) {
+  if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
+    if (factoryBtnPressTime == 0) {
+      factoryBtnPressTime = millis();
+    } else {
+      uint32_t ms = (uint32_t)(millis() - factoryBtnPressTime);
+      if (ms >= 2000) {
+        // Show display message: For factory keep for x seconds
+        if (ag->isOne()) {
+          oledDisplay.setText("Factory reset", "keep pressed", "for 8 sec");
+        } else {
+          Serial.println("Factory reset, keep pressed for 8 sec");
+        }
+
+        int count = 7;
+        while (ag->button.getState() == ag->button.BUTTON_PRESSED) {
+          delay(1000);
+          if (ag->isOne()) {
+
+            String str = "for " + String(count) + " sec";
+            oledDisplay.setText("Factory reset", "keep pressed", str.c_str());
+          } else {
+            Serial.printf("Factory reset, keep pressed for %d sec\r\n", count);
+          }
+          count--;
+          if (count == 0) {
+            /** Stop MQTT task first */
+            if (mqttTask) {
+              vTaskDelete(mqttTask);
+              mqttTask = NULL;
+            }
+
+            /** Reset WIFI */
+            WiFi.disconnect(true, true);
+
+            /** Reset local config */
+            configuration.reset();
+
+            if (ag->isOne()) {
+              oledDisplay.setText("Factory reset", "successful", "");
+            } else {
+              Serial.println("Factory reset successful");
+            }
+            delay(3000);
+            oledDisplay.setText("","","");
+            ESP.restart();
+          }
+        }
+
+        /** Show current content cause reset ignore */
+        factoryBtnPressTime = 0;
+        if (ag->isOne()) {
+          updateDisplayAndLedBar();
+        }
+      }
+    }
+  } else {
+    if (factoryBtnPressTime != 0) {
+      if (ag->isOne()) {
+        /** Restore last display content */
+        updateDisplayAndLedBar();
+      }
+    }
+    factoryBtnPressTime = 0;
+  }
+}
+
+static void wdgFeedUpdate(void) {
+  ag->watchdog.reset();
+  Serial.println("External watchdog feed!");
+}
+
+static void ledBarEnabledUpdate(void) {
+  if (ag->isOne()) {
+    int brightness = configuration.getLedBarBrightness();
+    Serial.println("LED bar brightness: " + String(brightness));
+    if ((brightness == 0) || (configuration.getLedBarMode() == LedBarModeOff)) {
+      ag->ledBar.setEnable(false);
+    } else {
+      ag->ledBar.setBrightness(brightness);
+      ag->ledBar.setEnable(configuration.getLedBarMode() != LedBarModeOff);
+    }
+     ag->ledBar.show();
+  }
+}
+
+static void sendDataToAg() {
+  /** Change oledDisplay and led state */
+  if (ag->isOne()) {
+    stateMachine.displayHandle(AgStateMachineWiFiOkServerConnecting);
+  }
+  stateMachine.handleLeds(AgStateMachineWiFiOkServerConnecting);
+
+  /** Task handle led connecting animation */
+  xTaskCreate(
+      [](void *obj) {
+        for (;;) {
+          // ledSmHandler();
+          stateMachine.handleLeds();
+          if (stateMachine.getLedState() !=
+              AgStateMachineWiFiOkServerConnecting) {
+            break;
+          }
+          delay(LED_BAR_ANIMATION_PERIOD);
+        }
+        vTaskDelete(NULL);
+      },
+      "task_led", 2048, NULL, 5, NULL);
+
+  delay(1500);
+  if (apiClient.sendPing(wifiConnector.RSSI(), measurements.bootCount)) {
+    if (ag->isOne()) {
+      stateMachine.displayHandle(AgStateMachineWiFiOkServerConnected);
+    }
+    stateMachine.handleLeds(AgStateMachineWiFiOkServerConnected);
+  } else {
+    if (ag->isOne()) {
+      stateMachine.displayHandle(AgStateMachineWiFiOkServerConnectFailed);
+    }
+    stateMachine.handleLeds(AgStateMachineWiFiOkServerConnectFailed);
+  }
+  delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
+  stateMachine.handleLeds(AgStateMachineNormal);
+}
+
+void dispSensorNotFound(String ss) {
+  ss = ss + " not found";
+  oledDisplay.setText("Sensor init", "Error:", ss.c_str());
+  delay(2000);
+}
+
+static void oneIndoorInit(void) {
+  configuration.hasSensorPMS2 = false;
+
+  /** Display init */
+  oledDisplay.begin();
+
+  /** Show boot display */
+  Serial.println("Firmware Version: " + ag->getVersion());
+
+  oledDisplay.setText("AirGradient ONE",
+                      "FW Version: ", ag->getVersion().c_str());
+  delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
+
+  ag->ledBar.begin();
+  ag->button.begin();
+  ag->watchdog.begin();
+
+  /** Run LED test on start up if button pressed */
+  oledDisplay.setText("Press now for", "LED test", "");
+  ledBarButtonTest = false;
+  uint32_t stime = millis();
+  while (true) {
+    if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
+      ledBarButtonTest = true;
+      stateMachine.executeLedBarPowerUpTest();
+      break;
+    }
+    delay(1);
+    uint32_t ms = (uint32_t)(millis() - stime);
+    if (ms >= 3000) {
+      break;
+    }
+  }
+
+  /** Check for button to reset WiFi connecto to "airgraident" after test LED
+   * bar */
+  if (ledBarButtonTest) {
+    if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
+      WiFi.begin("airgradient", "cleanair");
+      oledDisplay.setText("Configure WiFi", "connect to", "\'airgradient\'");
+      delay(2500);
+      oledDisplay.setText("Rebooting...", "","");
+      delay(2500);
+      oledDisplay.setText("","","");
+      ESP.restart();
+    }
+  }
+  ledBarEnabledUpdate();
+
+  /** Show message init sensor */
+  oledDisplay.setText("Monitor", "initializing...", "");
+
+  if (!sen66Init()) {
+    Serial.println("SEN66 sensor not found");
+    configuration.hasSensorPMS1 = false;
+    configuration.hasSensorS8 = false;
+    configuration.hasSensorSHT = false;
+    configuration.hasSensorSGP = false;
+    dispSensorNotFound("SEN66");
+  }
+}
+static void openAirInit(void) {
+  configuration.hasSensorSHT = true;
+  configuration.hasSensorS8 = true;
+  configuration.hasSensorPMS1 = true;
+  configuration.hasSensorPMS2 = false;
+  configuration.hasSensorSGP = true;
+
+  fwMode = FW_MODE_O_1PST;
+  Serial.println("Firmware Version: " + ag->getVersion());
+
+  ag->watchdog.begin();
+  ag->button.begin();
+  ag->statusLed.begin();
+
+  if (!sen66Init()) {
+    Serial.println("SEN66 sensor not found");
+    configuration.hasSensorPMS1 = false;
+    configuration.hasSensorS8 = false;
+    configuration.hasSensorSHT = false;
+    configuration.hasSensorSGP = false;
+    dispSensorNotFound("SEN66");
+  }
+
+  Serial.printf("Firmware Mode: %s\r\n", AgFirmwareModeName(fwMode));
+}
+
+static void boardInit(void) {
+  if (ag->isOne()) {
+    oneIndoorInit();
+  } else {
+    openAirInit();
+  }
+
+  localServer.setFwMode(fwMode);
+}
+
+static void failedHandler(String msg) {
+  while (true) {
+    Serial.println(msg);
+    vTaskDelay(1000);
+  }
+}
+
+static void configurationUpdateSchedule(void) {
+  if (apiClient.fetchServerConfiguration()) {
+    configUpdateHandle();
+  }
+}
+
+static void configUpdateHandle() {
+  if (configuration.isUpdated() == false) {
+    return;
+  }
+
+  stateMachine.executeCo2Calibration();
+
+  String mqttUri = configuration.getMqttBrokerUri();
+  if (mqttClient.isCurrentUri(mqttUri) == false) {
+    mqttClient.end();
+    initMqtt();
+  }
+
+  if (ag->isOne()) {
+    if (configuration.isLedBarBrightnessChanged()) {
+      if (configuration.getLedBarBrightness() == 0) {
+        ag->ledBar.setEnable(false);
+      } else {
+        if (configuration.getLedBarMode() != LedBarMode::LedBarModeOff) {
+          ag->ledBar.setEnable(true);
+        }
+        ag->ledBar.setBrightness(configuration.getLedBarBrightness());
+      }
+      ag->ledBar.show();
+    }
+
+    if (configuration.isLedBarModeChanged()) {
+      if (configuration.getLedBarBrightness() == 0) {
+        ag->ledBar.setEnable(false);
+      } else {
+        if(configuration.getLedBarMode() == LedBarMode::LedBarModeOff) {
+          ag->ledBar.setEnable(false);
+        } else {
+          ag->ledBar.setEnable(true);
+          ag->ledBar.setBrightness(configuration.getLedBarBrightness());
+        }
+      }
+      ag->ledBar.show();
+    }
+
+    if (configuration.isDisplayBrightnessChanged()) {
+      oledDisplay.setBrightness(configuration.getDisplayBrightness());
+    }
+
+    stateMachine.executeLedBarTest();
+  }
+  else if(ag->isOpenAir()) {
+    stateMachine.executeLedBarTest();
+  }
+
+  // Update display and led bar notification based on updated configuration
+  updateDisplayAndLedBar();
+}
+
+static void updateDisplayAndLedBar(void) {
+  if (factoryBtnPressTime != 0) {
+    // Do not distrub factory reset sequence countdown
+    return;
+  }
+
+  if (configuration.isOfflineMode()) {
+    // Ignore network related status when in offline mode
+    stateMachine.displayHandle(AgStateMachineNormal);
+    stateMachine.handleLeds(AgStateMachineNormal);
+    return;
+  }
+
+  AgStateMachineState state = AgStateMachineNormal;
+  if (wifiConnector.isConnected() == false) {
+    state = AgStateMachineWiFiLost;
+  } else if (apiClient.isFetchConfigureFailed()) {
+    state = AgStateMachineSensorConfigFailed;
+    if (apiClient.isNotAvailableOnDashboard()) {
+      stateMachine.displaySetAddToDashBoard();
+    } else {
+      stateMachine.displayClearAddToDashBoard();
+    }
+  } else if (apiClient.isPostToServerFailed() && configuration.isPostDataToAirGradient()) {
+    state = AgStateMachineServerLost;
+  }
+
+  stateMachine.displayHandle(state);
+  stateMachine.handleLeds(state);
+}
+
+static bool sen66Init(void) {
+  if (sen66Ready) {
+    return true;
+  }
+
+  sen66.begin(Wire, SEN66_I2C_ADDR_6B);
+
+  int16_t err = sen66.deviceReset();
+  if (err != NO_ERROR) {
+    errorToString(err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
+    Serial.print("Error: deviceReset() -> ");
+    Serial.println(sen66ErrorMessage);
+    return false;
+  }
+
+  delay(1200);
+
+  err = sen66.startContinuousMeasurement();
+  if (err != NO_ERROR) {
+    errorToString(err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
+    Serial.print("Error: startContinuousMeasurement() -> ");
+    Serial.println(sen66ErrorMessage);
+    return false;
+  }
+
+  sen66Ready = true;
+  sen66Sample.valid = false;
+  lastSen66Read = 0;
+  lastSen66Log = 0;
+
+  configuration.hasSensorPMS1 = true;
+  configuration.hasSensorS8 = true;
+  configuration.hasSensorSHT = true;
+  configuration.hasSensorSGP = true;
+
+  Serial.println("SEN66 ready");
+  return true;
+}
+
+static bool ensureSen66Sample(bool forceRead) {
+  if (!sen66Ready) {
+    return false;
+  }
+
+  uint32_t now = millis();
+  if (!forceRead && sen66Sample.valid) {
+    uint32_t elapsed = now - lastSen66Read;
+    if (elapsed < SEN66_READ_INTERVAL_MS) {
+      return true;
+    }
+  }
+
+  float massConcentrationPm1p0 = NAN;
+  float massConcentrationPm2p5 = NAN;
+  float massConcentrationPm4p0 = NAN;
+  float massConcentrationPm10p0 = NAN;
+  float relativeHumidity = NAN;
+  float ambientTemperature = NAN;
+  float vocIndex = NAN;
+  float noxIndex = NAN;
+  uint16_t co2 = 0;
+
+  int16_t err = sen66.readMeasuredValues(
+      massConcentrationPm1p0,
+      massConcentrationPm2p5,
+      massConcentrationPm4p0,
+      massConcentrationPm10p0,
+      relativeHumidity,
+      ambientTemperature,
+      vocIndex,
+      noxIndex,
+      co2);
+  if (err != NO_ERROR) {
+    errorToString(err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
+    Serial.print("Error: readMeasuredValues() -> ");
+    Serial.println(sen66ErrorMessage);
+    sen66Sample.valid = false;
+    return false;
+  }
+
+  sen66Sample.pm1 = massConcentrationPm1p0;
+  sen66Sample.pm25 = massConcentrationPm2p5;
+  sen66Sample.pm4 = massConcentrationPm4p0;
+  sen66Sample.pm10 = massConcentrationPm10p0;
+  sen66Sample.humidity = relativeHumidity;
+  sen66Sample.temperature = ambientTemperature;
+  sen66Sample.vocIndex = vocIndex;
+  sen66Sample.noxIndex = noxIndex;
+  sen66Sample.co2 = co2;
+  sen66Sample.timestamp = now;
+  sen66Sample.valid = true;
+
+  lastSen66Read = now;
+  return true;
+}
+
+static void logSen66Sample(void) {
+  if (!sen66Sample.valid) {
+    return;
+  }
+
+  uint32_t now = millis();
+  if (now - lastSen66Log < SEN66_LOG_INTERVAL_MS) {
+    return;
+  }
+
+  lastSen66Log = now;
+
+  Serial.println();
+  Serial.printf("SEN66 Timestamp (ms): %lu\r\n", (unsigned long)sen66Sample.timestamp);
+  Serial.printf("PM1.0 ug/m3: %.1f\r\n", sen66Sample.pm1);
+  Serial.printf("PM2.5 ug/m3: %.1f\r\n", sen66Sample.pm25);
+  Serial.printf("PM4.0 ug/m3: %.1f\r\n", sen66Sample.pm4);
+  Serial.printf("PM10 ug/m3: %.1f\r\n", sen66Sample.pm10);
+  Serial.printf("Temperature C: %.2f\r\n", sen66Sample.temperature);
+  Serial.printf("Humidity %%: %.1f\r\n", sen66Sample.humidity);
+  Serial.printf("TVOC index: %.1f\r\n", sen66Sample.vocIndex);
+  Serial.printf("NOx index: %.1f\r\n", sen66Sample.noxIndex);
+  Serial.printf("CO2 ppm: %u\r\n", sen66Sample.co2);
+}
+
+static void sen66Update(void) {
+  if (!ensureSen66Sample(false)) {
+    measurements.pm01_1 = utils::getInvalidPmValue();
+    measurements.pm25_1 = utils::getInvalidPmValue();
+    measurements.pm10_1 = utils::getInvalidPmValue();
+    measurements.pm03PCount_1 = utils::getInvalidPmValue();
+    measurements.pm01_2 = utils::getInvalidPmValue();
+    measurements.pm25_2 = utils::getInvalidPmValue();
+    measurements.pm10_2 = utils::getInvalidPmValue();
+    measurements.pm03PCount_2 = utils::getInvalidPmValue();
+    measurements.Temperature = utils::getInvalidTemperature();
+    measurements.Humidity = utils::getInvalidHumidity();
+    measurements.temp_1 = utils::getInvalidTemperature();
+    measurements.hum_1 = utils::getInvalidHumidity();
+    measurements.TVOC = utils::getInvalidVOC();
+    measurements.TVOCRaw = -1;
+    measurements.NOx = utils::getInvalidNOx();
+    measurements.NOxRaw = -1;
+    measurements.CO2 = utils::getInvalidCO2();
+    return;
+  }
+
+  auto pmOrInvalid = [](float value) -> int {
+    if (isnan(value)) {
+      return utils::getInvalidPmValue();
+    }
+    return (int)lroundf(value);
+  };
+
+  measurements.pm01_1 = pmOrInvalid(sen66Sample.pm1);
+  measurements.pm25_1 = pmOrInvalid(sen66Sample.pm25);
+  measurements.pm10_1 = pmOrInvalid(sen66Sample.pm10);
+  measurements.pm03PCount_1 = utils::getInvalidPmValue();
+
+  measurements.pm01_2 = utils::getInvalidPmValue();
+  measurements.pm25_2 = utils::getInvalidPmValue();
+  measurements.pm10_2 = utils::getInvalidPmValue();
+  measurements.pm03PCount_2 = utils::getInvalidPmValue();
+
+  if (!isnan(sen66Sample.temperature)) {
+    measurements.Temperature = sen66Sample.temperature;
+    measurements.temp_1 = sen66Sample.temperature;
+  } else {
+    measurements.Temperature = utils::getInvalidTemperature();
+    measurements.temp_1 = utils::getInvalidTemperature();
+  }
+
+  if (!isnan(sen66Sample.humidity)) {
+    measurements.Humidity = lroundf(sen66Sample.humidity);
+    measurements.hum_1 = measurements.Humidity;
+  } else {
+    measurements.Humidity = utils::getInvalidHumidity();
+    measurements.hum_1 = utils::getInvalidHumidity();
+  }
+
+  measurements.TVOC = isnan(sen66Sample.vocIndex) ? utils::getInvalidVOC()
+                                                  : lroundf(sen66Sample.vocIndex);
+  measurements.TVOCRaw = -1;
+  measurements.NOx = isnan(sen66Sample.noxIndex) ? utils::getInvalidNOx()
+                                                 : lroundf(sen66Sample.noxIndex);
+  measurements.NOxRaw = -1;
+
+  if (utils::isValidCO2(sen66Sample.co2)) {
+    measurements.CO2 = sen66Sample.co2;
+    getCO2FailCount = 0;
+  } else {
+    getCO2FailCount++;
+    Serial.printf("SEN66 CO2 read failed %d\r\n", getCO2FailCount);
+    if (getCO2FailCount >= 3) {
+      measurements.CO2 = utils::getInvalidCO2();
+    }
+  }
+
+  logSen66Sample();
+}
+
+static void sendDataToServer(void) {
+  /** Ignore send data to server if postToAirGradient disabled */
+  if (configuration.isPostDataToAirGradient() == false || configuration.isOfflineMode()) {
+    return;
+  }
+
+  String syncData = measurements.toString(false, fwMode, wifiConnector.RSSI(),
+                                          ag, &configuration);
+  if (apiClient.postToServer(syncData)) {
+    Serial.println();
+    Serial.println(
+        "Online mode and isPostToAirGradient = true: watchdog reset");
+    Serial.println();
+  }
+  measurements.bootCount++;
+}
