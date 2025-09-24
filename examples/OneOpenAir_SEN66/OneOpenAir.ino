@@ -74,15 +74,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000) /** ms */
 #define SEN66_READ_INTERVAL_MS 1000                   /** ms */
 #define SEN66_LOG_INTERVAL_MS 2000                    /** ms */
-#define SEN66_DATA_READY_TIMEOUT_MS 500               /** ms */
-#define SEN66_DATA_READY_POLL_MS 50                   /** ms */
-#define SEN66_CALIB_WARMUP_MS (3UL * 60UL * 1000UL)   /** ms */
-#define SEN66_FRC_MAX_RETRIES 3
-#define SEN66_FRC_RETRY_DELAY_MS 200 /** ms */
-#define SEN66_INVALID_CO2_CORRECTION 0xFFFF
-static const int16_t SEN66_ERR_I2C_ADDRESS_NACK =
-    static_cast<int16_t>(static_cast<uint16_t>(HighLevelError::WriteError) |
-                         static_cast<uint16_t>(LowLevelError::I2cAddressNack));
+#define TIME_TO_CALIBRATE_CO2_MS 60000               /** ms */
 
 /** I2C define */
 #define I2C_SDA_PIN 7
@@ -139,8 +131,9 @@ static bool sen66Ready = false;
 static bool sen66PollingSuspended = false;
 static uint32_t lastSen66Log = 0;
 static uint32_t lastSen66Read = 0;
-static uint32_t sen66MeasurementStart = 0;
 static char sen66ErrorMessage[64];
+static int16_t sen66ErrorCode = NO_ERROR;
+static uint32_t sensorStartTime = 0;
 
 static void boardInit(void);
 static void failedHandler(String msg);
@@ -202,7 +195,7 @@ void setup() {
   Serial.println("Detected " + ag->getBoardName());
 
   configuration.setAirGradient(ag);
-  oledDisplay.setAirGradient(ag);
+  // oledDisplay.setAirGradient(ag);
   stateMachine.setAirGradient(ag);
   wifiConnector.setAirGradient(ag);
   apiClient.setAirGradient(ag);
@@ -216,6 +209,7 @@ void setup() {
   boardInit();
   sen66Schedule.update();
 
+#if 0
   /** Connecting wifi */
   bool connectToWifi = false;
   if (ag->isOne()) {
@@ -259,12 +253,12 @@ void setup() {
         initMqtt();
         sendDataToAg();
 
-#ifdef ESP8266
-        // ota not supported
-#else
-        firmwareCheckForUpdate();
-        checkForUpdateSchedule.update();
-#endif
+        #ifdef ESP8266
+          // ota not supported
+        #else
+          firmwareCheckForUpdate();
+          checkForUpdateSchedule.update();
+        #endif
 
         apiClient.fetchServerConfiguration();
         configSchedule.update();
@@ -305,17 +299,18 @@ void setup() {
     oledDisplay.setText("Warming Up", "Serial Number:", ag->deviceId().c_str());
     delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
 
-    Serial.println("Display brightness: " +
-                   String(configuration.getDisplayBrightness()));
+    Serial.println("Display brightness: " + String(configuration.getDisplayBrightness()));
     oledDisplay.setBrightness(configuration.getDisplayBrightness());
   }
 
   // Update display and led bar after finishing setup to show dashboard
   updateDisplayAndLedBar();
+  #endif
 }
 
 void loop() {
   /** Handle schedule */
+#if 0
   dispLedSchedule.run();
   configSchedule.run();
   agApiPostSchedule.run();
@@ -334,6 +329,13 @@ void loop() {
 
   /** Firmware check for update handle */
   checkForUpdateSchedule.run();
+#else
+sen66Schedule.run();
+  if ((millis() - sensorStartTime) > TIME_TO_CALIBRATE_CO2_MS) {
+    performSen66ForcedCo2Calibration();
+    sensorStartTime = millis();
+  }
+#endif
 }
 
 static void mdnsInit(void) {
@@ -410,7 +412,7 @@ static void factoryConfigReset(void) {
       if (ms >= 2000) {
         // Show display message: For factory keep for x seconds
         if (ag->isOne()) {
-          oledDisplay.setText("Factory reset", "keep pressed", "for 8 sec");
+          // oledDisplay.setText("Factory reset", "keep pressed", "for 8 sec");
         } else {
           Serial.println("Factory reset, keep pressed for 8 sec");
         }
@@ -421,7 +423,7 @@ static void factoryConfigReset(void) {
           if (ag->isOne()) {
 
             String str = "for " + String(count) + " sec";
-            oledDisplay.setText("Factory reset", "keep pressed", str.c_str());
+            // oledDisplay.setText("Factory reset", "keep pressed", str.c_str());
           } else {
             Serial.printf("Factory reset, keep pressed for %d sec\r\n", count);
           }
@@ -440,12 +442,12 @@ static void factoryConfigReset(void) {
             configuration.reset();
 
             if (ag->isOne()) {
-              oledDisplay.setText("Factory reset", "successful", "");
+            // oledDisplay.setText("Factory reset", "successful", "");
             } else {
               Serial.println("Factory reset successful");
             }
             delay(3000);
-            oledDisplay.setText("", "", "");
+            // oledDisplay.setText("", "", "");
             ESP.restart();
           }
         }
@@ -525,7 +527,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
   switch (state) {
   case OtaState::OTA_STATE_BEGIN: {
     if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateVersion(msg);
+      // oledDisplay.showFirmwareUpdateVersion(msg);
     } else {
       Serial.println("New firmware: " + msg);
     }
@@ -534,7 +536,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
   }
   case OtaState::OTA_STATE_FAIL: {
     if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateFailed();
+      // oledDisplay.showFirmwareUpdateFailed();
     } else {
       Serial.println("Error: Firmware update: failed");
     }
@@ -544,7 +546,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
   }
   case OtaState::OTA_STATE_SKIP: {
     if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateSkipped();
+      // oledDisplay.showFirmwareUpdateSkipped();
     } else {
       Serial.println("Firmware update: Skipped");
     }
@@ -554,7 +556,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
   }
   case OtaState::OTA_STATE_UP_TO_DATE: {
     if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateUpToDate();
+      // oledDisplay.showFirmwareUpdateUpToDate();
     } else {
       Serial.println("Firmware update: up to date");
     }
@@ -564,7 +566,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
   }
   case OtaState::OTA_STATE_PROCESSING: {
     if (ag->isOne()) {
-      oledDisplay.showFirmwareUpdateProgress(processing);
+      // oledDisplay.showFirmwareUpdateProgress(processing);
     } else {
       Serial.println("Firmware update: " + String(processing) + String("%"));
     }
@@ -580,14 +582,14 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
       while (i != 0) {
         i = i - 1;
         if (ag->isOne()) {
-          oledDisplay.showFirmwareUpdateSuccess(i);
+          // oledDisplay.showFirmwareUpdateSuccess(i);
         } else {
           Serial.println("Rebooting... " + String(i));
         }
 
         delay(1000);
       }
-      oledDisplay.setBrightness(0);
+      // oledDisplay.setBrightness(0);
       esp_restart();
     }
     break;
@@ -600,7 +602,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
 static void sendDataToAg() {
   /** Change oledDisplay and led state */
   if (ag->isOne()) {
-    stateMachine.displayHandle(AgStateMachineWiFiOkServerConnecting);
+    // stateMachine.displayHandle(AgStateMachineWiFiOkServerConnecting);
   }
   stateMachine.handleLeds(AgStateMachineWiFiOkServerConnecting);
 
@@ -638,104 +640,23 @@ static void sendDataToAg() {
 
 void dispSensorNotFound(String ss) {
   ss = ss + " not found";
-  oledDisplay.setText("Sensor init", "Error:", ss.c_str());
+  // oledDisplay.setText("Sensor init", "Error:", ss.c_str());
   delay(2000);
 }
 
-static void oneIndoorInit(void) {
-  configuration.hasSensorPMS2 = false;
-
-  /** Display init */
-  oledDisplay.begin();
-
-  /** Show boot display */
-  Serial.println("Firmware Version: " + ag->getVersion());
-
-  oledDisplay.setText("AirGradient ONE",
-                      "FW Version: ", ag->getVersion().c_str());
-  delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
-
-  ag->ledBar.begin();
-  ag->button.begin();
-  ag->watchdog.begin();
-
-  /** Run LED test on start up if button pressed */
-  oledDisplay.setText("Press now for", "LED test", "");
-  ledBarButtonTest = false;
-  uint32_t stime = millis();
-  while (true) {
-    if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
-      ledBarButtonTest = true;
-      stateMachine.executeLedBarPowerUpTest();
-      break;
-    }
-    delay(1);
-    uint32_t ms = (uint32_t)(millis() - stime);
-    if (ms >= 3000) {
-      break;
-    }
-  }
-
-  /** Check for button to reset WiFi connecto to "airgraident" after test LED
-   * bar */
-  if (ledBarButtonTest) {
-    if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
-      WiFi.begin("airgradient", "cleanair");
-      oledDisplay.setText("Configure WiFi", "connect to", "\'airgradient\'");
-      delay(2500);
-      oledDisplay.setText("Rebooting...", "", "");
-      delay(2500);
-      oledDisplay.setText("", "", "");
-      ESP.restart();
-    }
-  }
-  ledBarEnabledUpdate();
-
-  /** Show message init sensor */
-  oledDisplay.setText("Monitor", "initializing...", "");
-
-  if (!sen66Init()) {
-    configuration.hasSensorPMS1 = false;
-    configuration.hasSensorS8 = false;
-    configuration.hasSensorSGP = false;
-    configuration.hasSensorSHT = false;
-    dispSensorNotFound("SEN66");
-  }
-}
-static void openAirInit(void) {
-  configuration.hasSensorSHT = true;
-  configuration.hasSensorS8 = true;
-  configuration.hasSensorPMS1 = true;
-  configuration.hasSensorPMS2 = false;
-  configuration.hasSensorSGP = true;
-
-  fwMode = FW_MODE_O_1PST;
-  Serial.println("Firmware Version: " + ag->getVersion());
-
-  ag->watchdog.begin();
-  ag->button.begin();
-  ag->statusLed.begin();
-
-  if (!sen66Init()) {
-    configuration.hasSensorPMS1 = false;
-    configuration.hasSensorS8 = false;
-    configuration.hasSensorSGP = false;
-    configuration.hasSensorSHT = false;
-    Serial.println("SEN66 sensor not found");
-    dispSensorNotFound("SEN66");
-  }
-
-  Serial.printf("Firmware Mode: %s\r\n", AgFirmwareModeName(fwMode));
-}
+#if 0
+// Original board initialization routines disabled for SEN66-only test
+static void oneIndoorInit(void) {}
+static void openAirInit(void) {}
+#endif
 
 static void boardInit(void) {
-  if (ag->isOne()) {
-    oneIndoorInit();
-  } else {
-    openAirInit();
+  if (!sen66Init()) {
+    configuration.hasSensorPMS1 = false;
+    configuration.hasSensorS8 = false;
+    configuration.hasSensorSHT = false;
+    Serial.println("SEN66 sensor not found");
   }
-
-  localServer.setFwMode(fwMode);
 }
 
 static void failedHandler(String msg) {
@@ -757,90 +678,7 @@ static void configUpdateHandle() {
   }
 
   if (configuration.isCo2CalibrationRequested()) {
-    if (!sen66Ready) {
-      Serial.println("CO2 calibration requested but SEN66 sensor not ready");
-    } else if ((millis() - sen66MeasurementStart) < SEN66_CALIB_WARMUP_MS) {
-      Serial.println("SEN66 forced calibration skipped: sensor not warmed up "
-                     "(>=3 min) yet");
-    } else {
-      uint16_t correction = 0;
-
-      sen66PollingSuspended = true;
-      sen66Sample.valid = false;
-
-      int16_t stopErr = sen66.stopMeasurement();
-      if (stopErr != NO_ERROR) {
-        errorToString((uint16_t)stopErr, sen66ErrorMessage,
-                      sizeof(sen66ErrorMessage));
-        Serial.print("SEN66 stopMeasurement failed: ");
-        Serial.println(sen66ErrorMessage);
-      } else {
-        delay(60000);
-
-        Serial.println("Stopped SEN66 measurement for CO2 calibration");
-        int16_t frcErr = NO_ERROR;
-        bool frcSuccess = false;
-
-        for (int attempt = 0; attempt < SEN66_FRC_MAX_RETRIES; ++attempt) {
-          frcErr = sen66.performForcedCo2Recalibration(400, correction);
-          if (frcErr == NO_ERROR) {
-            if (correction == SEN66_INVALID_CO2_CORRECTION) {
-              Serial.println(
-                  "SEN66 forced calibration returned invalid correction");
-            } else {
-              frcSuccess = true;
-              Serial.println("SEN66 forced CO2 calibration success");
-              Serial.print("SEN66 correction: ");
-              Serial.println(correction);
-            }
-            break;
-          }
-
-          if (frcErr == SEN66_ERR_I2C_ADDRESS_NACK &&
-              (attempt + 1) < SEN66_FRC_MAX_RETRIES) {
-            Serial.println(
-                "SEN66 forced calibration got address NACK, retrying...");
-            delay(SEN66_FRC_RETRY_DELAY_MS);
-            continue;
-          }
-
-          errorToString((uint16_t)frcErr, sen66ErrorMessage,
-                        sizeof(sen66ErrorMessage));
-          Serial.print("SEN66 forced calibration failed: ");
-          Serial.println(sen66ErrorMessage);
-          break;
-        }
-
-        if (!frcSuccess && frcErr == NO_ERROR &&
-            correction == SEN66_INVALID_CO2_CORRECTION) {
-          // Invalid correction already logged.
-        }
-      }
-
-      int16_t resetErr = sen66.deviceReset();
-      if (resetErr != NO_ERROR) {
-        errorToString((uint16_t)resetErr, sen66ErrorMessage,
-                      sizeof(sen66ErrorMessage));
-        Serial.print("SEN66 deviceReset failed: ");
-        Serial.println(sen66ErrorMessage);
-      } else {
-        delay(1200);
-        int16_t startErr = sen66.startContinuousMeasurement();
-        if (startErr != NO_ERROR) {
-          errorToString((uint16_t)startErr, sen66ErrorMessage,
-                        sizeof(sen66ErrorMessage));
-          Serial.print("SEN66 startContinuousMeasurement failed: ");
-          Serial.println(sen66ErrorMessage);
-        } else {
-          sen66Ready = true;
-          sen66MeasurementStart = millis();
-          Serial.println("SEN66 restarted measurement after CO2 calibration");
-        }
-        delay(1200);
-      }
-
-      sen66PollingSuspended = false;
-    }
+    performSen66ForcedCo2Calibration();
   }
 
   String mqttUri = configuration.getMqttBrokerUri();
@@ -877,7 +715,7 @@ static void configUpdateHandle() {
     }
 
     if (configuration.isDisplayBrightnessChanged()) {
-      oledDisplay.setBrightness(configuration.getDisplayBrightness());
+      // oledDisplay.setBrightness(configuration.getDisplayBrightness());
     }
 
     stateMachine.executeLedBarTest();
@@ -950,7 +788,6 @@ static bool sen66Init(void) {
   sen66Sample.valid = false;
   lastSen66Read = 0;
   lastSen66Log = 0;
-  sen66MeasurementStart = millis();
 
   Serial.println("SEN66 ready");
   return true;
@@ -968,39 +805,6 @@ static bool ensureSen66Sample(bool forceRead) {
     }
   }
 
-  bool dataReady = false;
-  uint8_t padding = 0;
-  int16_t err = NO_ERROR;
-  const uint32_t waitStart = millis();
-  while ((millis() - waitStart) < SEN66_DATA_READY_TIMEOUT_MS) {
-    err = sen66.getDataReady(padding, dataReady);
-    if (err != NO_ERROR) {
-      errorToString((uint16_t)err, sen66ErrorMessage,
-                    sizeof(sen66ErrorMessage));
-      Serial.print("SEN66 getDataReady failed: ");
-      Serial.println(sen66ErrorMessage);
-      sen66Sample.valid = false;
-      return false;
-    }
-
-    Serial.printf("SEN66 dataReady=%d padding=%u\r\n", dataReady ? 1 : 0,
-                  static_cast<unsigned>(padding));
-
-    if (dataReady) {
-      break;
-    }
-
-    delay(SEN66_DATA_READY_POLL_MS);
-  }
-
-  if (!dataReady) {
-    Serial.println("SEN66 data not ready in time");
-    sen66Sample.valid = false;
-    return false;
-  }
-
-  now = millis();
-
   float massConcentrationPm1p0 = NAN;
   float massConcentrationPm2p5 = NAN;
   float massConcentrationPm4p0 = NAN;
@@ -1016,10 +820,10 @@ static bool ensureSen66Sample(bool forceRead) {
   float noxIndex = NAN;
   uint16_t co2 = 0;
 
-  err = sen66.readMeasuredValues(massConcentrationPm1p0, massConcentrationPm2p5,
-                                 massConcentrationPm4p0,
-                                 massConcentrationPm10p0, relativeHumidity,
-                                 ambientTemperature, vocIndex, noxIndex, co2);
+  int16_t err = sen66.readMeasuredValues(
+      massConcentrationPm1p0, massConcentrationPm2p5, massConcentrationPm4p0,
+      massConcentrationPm10p0, relativeHumidity, ambientTemperature, vocIndex,
+      noxIndex, co2);
   if (err != NO_ERROR) {
     errorToString((uint16_t)err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
     Serial.print("SEN66 readMeasuredValues failed: ");
@@ -1215,4 +1019,57 @@ static void sendDataToServer(void) {
     Serial.println();
   }
   measurements.bootCount++;
+}
+static void performSen66ForcedCo2Calibration(void) {
+  if (!sen66Ready) {
+    Serial.println("CO2 calibration requested but SEN66 sensor not ready");
+    return;
+  }
+
+  int16_t stopErr = sen66.stopMeasurement();
+  if (stopErr != NO_ERROR) {
+    errorToString((uint16_t)stopErr, sen66ErrorMessage,
+                  sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 stopContinuousMeasurement failed: ");
+    Serial.println(sen66ErrorMessage);
+    return;
+  }
+
+  Serial.println("SEN66 stopContinuousMeasurement success");
+
+  uint16_t correction = 0;
+  int16_t frcErr = sen66.performForcedCo2Recalibration(400, correction);
+  if (frcErr != NO_ERROR) {
+    errorToString((uint16_t)frcErr, sen66ErrorMessage,
+                  sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 forced calibration failed: ");
+    Serial.println(sen66ErrorMessage);
+  } else {
+    Serial.println("SEN66 forced CO2 calibration success");
+    Serial.print("SEN66 correction: ");
+    Serial.println(correction);
+  }
+
+  int16_t resetErr = sen66.deviceReset();
+  if (resetErr != NO_ERROR) {
+    errorToString((uint16_t)resetErr, sen66ErrorMessage,
+                  sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 deviceReset failed: ");
+    Serial.println(sen66ErrorMessage);
+  } else {
+    Serial.println("SEN66 deviceReset success");
+  }
+
+  delay(1200);
+  int16_t startErr = sen66.startContinuousMeasurement();
+  if (startErr != NO_ERROR) {
+    errorToString((uint16_t)startErr, sen66ErrorMessage,
+                  sizeof(sen66ErrorMessage));
+    Serial.print("SEN66 startContinuousMeasurement failed: ");
+    Serial.println(sen66ErrorMessage);
+  } else {
+    Serial.println("SEN66 startContinuousMeasurement success");
+  }
+
+  delay(1200);
 }
