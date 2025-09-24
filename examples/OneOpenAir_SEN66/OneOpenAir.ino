@@ -74,6 +74,15 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000) /** ms */
 #define SEN66_READ_INTERVAL_MS 1000                   /** ms */
 #define SEN66_LOG_INTERVAL_MS 2000                    /** ms */
+#define SEN66_DATA_READY_TIMEOUT_MS 500               /** ms */
+#define SEN66_DATA_READY_POLL_MS 50                   /** ms */
+#define SEN66_CALIB_WARMUP_MS (3UL * 60UL * 1000UL)   /** ms */
+#define SEN66_FRC_MAX_RETRIES 3
+#define SEN66_FRC_RETRY_DELAY_MS 200 /** ms */
+#define SEN66_INVALID_CO2_CORRECTION 0xFFFF
+static const int16_t SEN66_ERR_I2C_ADDRESS_NACK =
+    static_cast<int16_t>(static_cast<uint16_t>(HighLevelError::WriteError) |
+                         static_cast<uint16_t>(LowLevelError::I2cAddressNack));
 
 /** I2C define */
 #define I2C_SDA_PIN 7
@@ -130,6 +139,7 @@ static bool sen66Ready = false;
 static bool sen66PollingSuspended = false;
 static uint32_t lastSen66Log = 0;
 static uint32_t lastSen66Read = 0;
+static uint32_t sen66MeasurementStart = 0;
 static char sen66ErrorMessage[64];
 
 static void boardInit(void);
@@ -749,25 +759,88 @@ static void configUpdateHandle() {
   if (configuration.isCo2CalibrationRequested()) {
     if (!sen66Ready) {
       Serial.println("CO2 calibration requested but SEN66 sensor not ready");
+    } else if ((millis() - sen66MeasurementStart) < SEN66_CALIB_WARMUP_MS) {
+      Serial.println("SEN66 forced calibration skipped: sensor not warmed up "
+                     "(>=3 min) yet");
     } else {
       uint16_t correction = 0;
-      int16_t frcErr = sen66.performForcedCo2Recalibration(400, correction);
-      if (frcErr != NO_ERROR) {
-        errorToString((uint16_t)frcErr, sen66ErrorMessage,
+
+      sen66PollingSuspended = true;
+      sen66Sample.valid = false;
+
+      int16_t stopErr = sen66.stopMeasurement();
+      if (stopErr != NO_ERROR) {
+        errorToString((uint16_t)stopErr, sen66ErrorMessage,
                       sizeof(sen66ErrorMessage));
-        Serial.print("SEN66 forced calibration failed: ");
+        Serial.print("SEN66 stopMeasurement failed: ");
         Serial.println(sen66ErrorMessage);
       } else {
-        Serial.println("SEN66 forced CO2 calibration success");
-        Serial.print("SEN66 correction: ");
-        Serial.println(correction);
-      }
-    }
+        delay(60000);
 
-    sen66.deviceReset();
-    delay(1200);
-    sen66.startContinuousMeasurement();
-    delay(1200);
+        Serial.println("Stopped SEN66 measurement for CO2 calibration");
+        int16_t frcErr = NO_ERROR;
+        bool frcSuccess = false;
+
+        for (int attempt = 0; attempt < SEN66_FRC_MAX_RETRIES; ++attempt) {
+          frcErr = sen66.performForcedCo2Recalibration(400, correction);
+          if (frcErr == NO_ERROR) {
+            if (correction == SEN66_INVALID_CO2_CORRECTION) {
+              Serial.println(
+                  "SEN66 forced calibration returned invalid correction");
+            } else {
+              frcSuccess = true;
+              Serial.println("SEN66 forced CO2 calibration success");
+              Serial.print("SEN66 correction: ");
+              Serial.println(correction);
+            }
+            break;
+          }
+
+          if (frcErr == SEN66_ERR_I2C_ADDRESS_NACK &&
+              (attempt + 1) < SEN66_FRC_MAX_RETRIES) {
+            Serial.println(
+                "SEN66 forced calibration got address NACK, retrying...");
+            delay(SEN66_FRC_RETRY_DELAY_MS);
+            continue;
+          }
+
+          errorToString((uint16_t)frcErr, sen66ErrorMessage,
+                        sizeof(sen66ErrorMessage));
+          Serial.print("SEN66 forced calibration failed: ");
+          Serial.println(sen66ErrorMessage);
+          break;
+        }
+
+        if (!frcSuccess && frcErr == NO_ERROR &&
+            correction == SEN66_INVALID_CO2_CORRECTION) {
+          // Invalid correction already logged.
+        }
+      }
+
+      int16_t resetErr = sen66.deviceReset();
+      if (resetErr != NO_ERROR) {
+        errorToString((uint16_t)resetErr, sen66ErrorMessage,
+                      sizeof(sen66ErrorMessage));
+        Serial.print("SEN66 deviceReset failed: ");
+        Serial.println(sen66ErrorMessage);
+      } else {
+        delay(1200);
+        int16_t startErr = sen66.startContinuousMeasurement();
+        if (startErr != NO_ERROR) {
+          errorToString((uint16_t)startErr, sen66ErrorMessage,
+                        sizeof(sen66ErrorMessage));
+          Serial.print("SEN66 startContinuousMeasurement failed: ");
+          Serial.println(sen66ErrorMessage);
+        } else {
+          sen66Ready = true;
+          sen66MeasurementStart = millis();
+          Serial.println("SEN66 restarted measurement after CO2 calibration");
+        }
+        delay(1200);
+      }
+
+      sen66PollingSuspended = false;
+    }
   }
 
   String mqttUri = configuration.getMqttBrokerUri();
@@ -877,6 +950,7 @@ static bool sen66Init(void) {
   sen66Sample.valid = false;
   lastSen66Read = 0;
   lastSen66Log = 0;
+  sen66MeasurementStart = millis();
 
   Serial.println("SEN66 ready");
   return true;
@@ -894,6 +968,39 @@ static bool ensureSen66Sample(bool forceRead) {
     }
   }
 
+  bool dataReady = false;
+  uint8_t padding = 0;
+  int16_t err = NO_ERROR;
+  const uint32_t waitStart = millis();
+  while ((millis() - waitStart) < SEN66_DATA_READY_TIMEOUT_MS) {
+    err = sen66.getDataReady(padding, dataReady);
+    if (err != NO_ERROR) {
+      errorToString((uint16_t)err, sen66ErrorMessage,
+                    sizeof(sen66ErrorMessage));
+      Serial.print("SEN66 getDataReady failed: ");
+      Serial.println(sen66ErrorMessage);
+      sen66Sample.valid = false;
+      return false;
+    }
+
+    Serial.printf("SEN66 dataReady=%d padding=%u\r\n", dataReady ? 1 : 0,
+                  static_cast<unsigned>(padding));
+
+    if (dataReady) {
+      break;
+    }
+
+    delay(SEN66_DATA_READY_POLL_MS);
+  }
+
+  if (!dataReady) {
+    Serial.println("SEN66 data not ready in time");
+    sen66Sample.valid = false;
+    return false;
+  }
+
+  now = millis();
+
   float massConcentrationPm1p0 = NAN;
   float massConcentrationPm2p5 = NAN;
   float massConcentrationPm4p0 = NAN;
@@ -909,10 +1016,10 @@ static bool ensureSen66Sample(bool forceRead) {
   float noxIndex = NAN;
   uint16_t co2 = 0;
 
-  int16_t err = sen66.readMeasuredValues(
-      massConcentrationPm1p0, massConcentrationPm2p5, massConcentrationPm4p0,
-      massConcentrationPm10p0, relativeHumidity, ambientTemperature, vocIndex,
-      noxIndex, co2);
+  err = sen66.readMeasuredValues(massConcentrationPm1p0, massConcentrationPm2p5,
+                                 massConcentrationPm4p0,
+                                 massConcentrationPm10p0, relativeHumidity,
+                                 ambientTemperature, vocIndex, noxIndex, co2);
   if (err != NO_ERROR) {
     errorToString((uint16_t)err, sen66ErrorMessage, sizeof(sen66ErrorMessage));
     Serial.print("SEN66 readMeasuredValues failed: ");

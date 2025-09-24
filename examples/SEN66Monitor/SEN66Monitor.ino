@@ -197,70 +197,54 @@ static void calibrateCO2Sensor(void) {
     Serial.println("CO2 calibration requested but SEN66 sensor not ready");
   } else {
     sensorReady = false;
+    delay(2000);
 
-    // int16_t stopErr = sen66.stopMeasurement();
-    // if (stopErr != NO_ERROR) {
-    //   errorToString((uint16_t)stopErr, sen66ErrorMessage,
-    //                 sizeof(sen66ErrorMessage));
-    //   Serial.print("SEN66 stopMeasurement failed: ");
-    //   Serial.println(sen66ErrorMessage);
-    // } else {
+    uint16_t correction = 0;
+    int16_t stopErr = sen66.stopMeasurement();
+    if (stopErr != NO_ERROR) {
+      errorToString((uint16_t)stopErr, sen66ErrorMessage,
+                    sizeof(sen66ErrorMessage));
+      Serial.print("SEN66 stopMeasurement failed: ");
+      Serial.println(sen66ErrorMessage);
+    } else {
       delay(2000);
-
-      uint16_t correction = 0;
-      int16_t frcErr = sen66.performForcedCo2Recalibration(400, correction);
+      Serial.println("Stopped SEN66 measurement for CO2 calibration");
+      int16_t frcErr = sen66.performForcedCo2Recalibration(1000, correction);
       if (frcErr != NO_ERROR) {
         errorToString((uint16_t)frcErr, sen66ErrorMessage,
                       sizeof(sen66ErrorMessage));
         Serial.print("SEN66 forced calibration failed: ");
         Serial.println(sen66ErrorMessage);
+      } else if (correction == 0xFFFF) {
+        Serial.println("SEN66 forced calibration returned invalid correction");
       } else {
         Serial.println("SEN66 forced CO2 calibration success");
         Serial.print("SEN66 correction: ");
         Serial.println(correction);
       }
-
-      delay(2000);
-
-      // errorCode = sen66.startContinuousMeasurement();
-      // if (errorCode != NO_ERROR) {
-      //   errorToString(errorCode, errorMessage, sizeof(errorMessage));
-      //   Serial.print(F("Error: startContinuousMeasurement() -> "));
-      //   Serial.println(errorMessage);
-      //   return;
-      // }
-
-      const uint32_t dataReadyTimeoutMs = 5000;
-      const uint32_t pollIntervalMs = 100;
-      const uint32_t waitStart = millis();
-      bool sen66dataReady = false;
-      uint8_t padding = 0;
-      int16_t dataReadyErr = NO_ERROR;
-
-      while ((millis() - waitStart) < dataReadyTimeoutMs) {
-        dataReadyErr = sen66.getDataReady(padding, sen66dataReady);
-        if (dataReadyErr != NO_ERROR) {
-          errorToString((uint16_t)dataReadyErr, sen66ErrorMessage,
-                        sizeof(sen66ErrorMessage));
-          Serial.print("SEN66 getDataReady failed: ");
-          Serial.println(sen66ErrorMessage);
-          break;
-        }
-
-        if (sen66dataReady) {
-          sensorReady = true;
-          Serial.println(F("SEN66 data ready, continuous measurement resumed"));
-          break;
-        }
-
-        delay(pollIntervalMs);
-      }
-
-      if (dataReadyErr == NO_ERROR && !sen66dataReady) {
-        Serial.println("SEN66 data ready timeout after calibration");
-      }
     }
-  // }
+
+    int16_t resetErr = sen66.deviceReset();
+    if (resetErr != NO_ERROR) {
+      errorToString((uint16_t)resetErr, sen66ErrorMessage,
+                    sizeof(sen66ErrorMessage));
+      Serial.print("SEN66 deviceReset failed: ");
+      Serial.println(sen66ErrorMessage);
+    } else {
+      delay(1200);
+      int16_t startErr = sen66.startContinuousMeasurement();
+      if (startErr != NO_ERROR) {
+        errorToString((uint16_t)startErr, sen66ErrorMessage,
+                      sizeof(sen66ErrorMessage));
+        Serial.print("SEN66 startMeasurement failed: ");
+        Serial.println(sen66ErrorMessage);
+      } else {
+        sensorReady = true;
+        Serial.println("SEN66 restarted measurement after CO2 calibration");
+      }
+      delay(2000);
+    }
+  }
 }
 static void updateDisplay(void) {
   if (!hasDisplay || ag == nullptr) {
