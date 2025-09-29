@@ -36,40 +36,45 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 
 */
 
-#include <HardwareSerial.h>
-#include "AirGradient.h"
-#include "OtaHandler.h"
 #include "AgApiClient.h"
 #include "AgConfigure.h"
 #include "AgSchedule.h"
 #include "AgStateMachine.h"
 #include "AgWiFiConnector.h"
+#include "AirGradient.h"
 #include "EEPROM.h"
 #include "ESPmDNS.h"
 #include "LocalServer.h"
 #include "MqttClient.h"
 #include "OpenMetrics.h"
+#include "OtaHandler.h"
 #include "WebServer.h"
+#include <HardwareSerial.h>
+#include <SensirionUartSps30.h>
 #include <WebServer.h>
 #include <WiFi.h>
 
-#define LED_BAR_ANIMATION_PERIOD 100         /** ms */
-#define DISP_UPDATE_INTERVAL 2500            /** ms */
-#define SERVER_CONFIG_SYNC_INTERVAL 60000    /** ms */
-#define SERVER_SYNC_INTERVAL 60000           /** ms */
-#define MQTT_SYNC_INTERVAL 60000             /** ms */
-#define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5     /** sec */
-#define SENSOR_TVOC_UPDATE_INTERVAL 1000     /** ms */
-#define SENSOR_CO2_UPDATE_INTERVAL 4000      /** ms */
-#define SENSOR_PM_UPDATE_INTERVAL 2000       /** ms */
-#define SENSOR_TEMP_HUM_UPDATE_INTERVAL 2000 /** ms */
-#define DISPLAY_DELAY_SHOW_CONTENT_MS 2000   /** ms */
-#define FIRMWARE_CHECK_FOR_UPDATE_MS (60*60*1000)   /** ms */
+#define LED_BAR_ANIMATION_PERIOD 100                  /** ms */
+#define DISP_UPDATE_INTERVAL 2500                     /** ms */
+#define SERVER_CONFIG_SYNC_INTERVAL 60000             /** ms */
+#define SERVER_SYNC_INTERVAL 60000                    /** ms */
+#define MQTT_SYNC_INTERVAL 60000                      /** ms */
+#define SENSOR_CO2_CALIB_COUNTDOWN_MAX 5              /** sec */
+#define SENSOR_TVOC_UPDATE_INTERVAL 1000              /** ms */
+#define SENSOR_CO2_UPDATE_INTERVAL 4000               /** ms */
+#define SENSOR_PM_UPDATE_INTERVAL 2000                /** ms */
+#define SENSOR_TEMP_HUM_UPDATE_INTERVAL 2000          /** ms */
+#define DISPLAY_DELAY_SHOW_CONTENT_MS 2000            /** ms */
+#define FIRMWARE_CHECK_FOR_UPDATE_MS (60 * 60 * 1000) /** ms */
 
 /** I2C define */
 #define I2C_SDA_PIN 7
 #define I2C_SCL_PIN 6
 #define OLED_I2C_ADDR 0x3C
+
+#define NO_ERROR 0
+
+#define SENSOR_SPS30
 
 static MqttClient mqttClient(Serial);
 static TaskHandle_t mqttTask = NULL;
@@ -87,6 +92,17 @@ static OpenMetrics openMetrics(measurements, configuration, wifiConnector,
 static OtaHandler otaHandler;
 static LocalServer localServer(Serial, openMetrics, measurements, configuration,
                                wifiConnector);
+
+// SPS30 sensor object
+static SensirionUartSps30 sps30;
+#ifdef SENSOR_SPS30
+static bool sps30Connected = false;
+static uint8_t sps30FailCount = 0;
+static const uint8_t SPS30_FAIL_LIMIT = 3;
+static Stream *sps30Serial = nullptr;
+#endif
+
+//
 
 static uint32_t factoryBtnPressTime = 0;
 static int getCO2FailCount = 0;
@@ -113,8 +129,10 @@ static void ledBarEnabledUpdate(void);
 static bool sgp41Init(void);
 static void firmwareCheckForUpdate(void);
 static void otaHandlerCallback(OtaState state, String mesasge);
-static void displayExecuteOta(OtaState state, String msg,
-                              int processing);
+static void displayExecuteOta(OtaState state, String msg, int processing);
+
+// SPS30 function
+static bool sps30Init(Stream &serial);
 
 AgSchedule dispLedSchedule(DISP_UPDATE_INTERVAL, updateDisplayAndLedBar);
 AgSchedule configSchedule(SERVER_CONFIG_SYNC_INTERVAL,
@@ -125,7 +143,8 @@ AgSchedule pmsSchedule(SENSOR_PM_UPDATE_INTERVAL, updatePm);
 AgSchedule tempHumSchedule(SENSOR_TEMP_HUM_UPDATE_INTERVAL, tempHumUpdate);
 AgSchedule tvocSchedule(SENSOR_TVOC_UPDATE_INTERVAL, updateTvoc);
 AgSchedule watchdogFeedSchedule(60000, wdgFeedUpdate);
-AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS, firmwareCheckForUpdate);
+AgSchedule checkForUpdateSchedule(FIRMWARE_CHECK_FOR_UPDATE_MS,
+                                  firmwareCheckForUpdate);
 
 void setup() {
   /** Serial for print debug message */
@@ -209,12 +228,12 @@ void setup() {
         initMqtt();
         sendDataToAg();
 
-        #ifdef ESP8266
-          // ota not supported
-        #else
-          firmwareCheckForUpdate();
-          checkForUpdateSchedule.update();
-        #endif
+#ifdef ESP8266
+        // ota not supported
+#else
+        firmwareCheckForUpdate();
+        checkForUpdateSchedule.update();
+#endif
 
         apiClient.fetchServerConfiguration();
         configSchedule.update();
@@ -255,7 +274,8 @@ void setup() {
     oledDisplay.setText("Warming Up", "Serial Number:", ag->deviceId().c_str());
     delay(DISPLAY_DELAY_SHOW_CONTENT_MS);
 
-    Serial.println("Display brightness: " + String(configuration.getDisplayBrightness()));
+    Serial.println("Display brightness: " +
+                   String(configuration.getDisplayBrightness()));
     oledDisplay.setBrightness(configuration.getDisplayBrightness());
   }
 
@@ -283,13 +303,24 @@ void loop() {
   if (configuration.hasSensorSGP) {
     tvocSchedule.run();
   }
+#ifdef SENSOR_SPS30
+  if (configuration.hasSensorPMS1) {
+    static bool loggedSps30State = false;
+    if (loggedSps30State != sps30Connected) {
+      loggedSps30State = sps30Connected;
+      Serial.printf("SPS30 sensor %s\r\n",
+                    loggedSps30State ? "connected" : "removed");
+    }
+  }
+#else
   if (ag->isOne()) {
     if (configuration.hasSensorPMS1) {
       ag->pms5003.handle();
       static bool pmsConnected = false;
       if (pmsConnected != ag->pms5003.connected()) {
         pmsConnected = ag->pms5003.connected();
-        Serial.printf("PMS sensor %s ", pmsConnected?"connected":"removed");
+        Serial.printf("PMS sensor %s ",
+                      pmsConnected ? "connected" : "removed");
       }
     }
   } else {
@@ -300,6 +331,7 @@ void loop() {
       ag->pms5003t_2.handle();
     }
   }
+#endif
 
   watchdogFeedSchedule.run();
 
@@ -440,7 +472,7 @@ static void factoryConfigReset(void) {
               Serial.println("Factory reset successful");
             }
             delay(3000);
-            oledDisplay.setText("","","");
+            oledDisplay.setText("", "", "");
             ESP.restart();
           }
         }
@@ -478,7 +510,7 @@ static void ledBarEnabledUpdate(void) {
       ag->ledBar.setBrightness(brightness);
       ag->ledBar.setEnable(configuration.getLedBarMode() != LedBarModeOff);
     }
-     ag->ledBar.show();
+    ag->ledBar.show();
   }
 }
 
@@ -582,7 +614,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
   }
   case OtaState::OTA_STATE_SUCCESS: {
     int i = 6;
-    while(i != 0) {
+    while (i != 0) {
       i = i - 1;
       Serial.println("OTA update performed, restarting ...");
       int i = 6;
@@ -593,7 +625,7 @@ static void displayExecuteOta(OtaState state, String msg, int processing) {
         } else {
           Serial.println("Rebooting... " + String(i));
         }
-        
+
         delay(1000);
       }
       oledDisplay.setBrightness(0);
@@ -692,9 +724,9 @@ static void oneIndoorInit(void) {
       WiFi.begin("airgradient", "cleanair");
       oledDisplay.setText("Configure WiFi", "connect to", "\'airgradient\'");
       delay(2500);
-      oledDisplay.setText("Rebooting...", "","");
+      oledDisplay.setText("Rebooting...", "", "");
       delay(2500);
-      oledDisplay.setText("","","");
+      oledDisplay.setText("", "", "");
       ESP.restart();
     }
   }
@@ -722,6 +754,15 @@ static void oneIndoorInit(void) {
     dispSensorNotFound("S8");
   }
 
+#ifdef SENSOR_SPS30
+  Serial.println("Init SPS30 sensor");
+  Serial0.begin(115200);
+  bool sps30Success = sps30Init(Serial0);
+  if (sps30Success == false) {
+    configuration.hasSensorPMS1 = false;
+    dispSensorNotFound("SPS30");
+  }
+#else
   /** Init PMS5003 */
   if (ag->pms5003.begin(Serial0) == false) {
     Serial.println("PMS sensor not found");
@@ -729,6 +770,7 @@ static void oneIndoorInit(void) {
 
     dispSensorNotFound("PMS");
   }
+#endif
 }
 static void openAirInit(void) {
   configuration.hasSensorSHT = false;
@@ -783,6 +825,57 @@ static void openAirInit(void) {
   }
 
   /** Attempt to detect PM sensors */
+#ifdef SENSOR_SPS30
+
+  if (fwMode == FW_MODE_O_1PST) {
+    bool pmInitSuccess = false;
+    if (serial0Available) {
+      pmInitSuccess = sps30Init(Serial0);
+      if (pmInitSuccess == false) {
+        configuration.hasSensorPMS1 = false;
+        Serial.println("No PM sensor detected on Serial0");
+      } else {
+        serial0Available = false;
+        Serial.println("Detected PM 1 on Serial0");
+      }
+    }
+    if (pmInitSuccess == false) {
+      if (serial1Available) {
+        pmInitSuccess = sps30Init(Serial1);
+        if (pmInitSuccess == false) {
+          configuration.hasSensorPMS1 = false;
+          Serial.println("No PM sensor detected on Serial1");
+        } else {
+          serial1Available = false;
+          Serial.println("Detected PM 1 on Serial1");
+        }
+      }
+    }
+    configuration.hasSensorPMS2 = false; // Disable PM2
+  } else {
+    if (sps30Init(Serial0) == false) {
+      configuration.hasSensorPMS1 = false;
+      Serial.println("No PM sensor detected on Serial0");
+    } else {
+      Serial.println("Detected PM 1 on Serial0");
+    }
+    if (sps30Init(Serial1) == false) {
+      configuration.hasSensorPMS2 = false;
+      Serial.println("No PM sensor detected on Serial1");
+    } else {
+      Serial.println("Detected PM 2 on Serial1");
+    }
+
+    if (fwMode == FW_MODE_O_1PP) {
+      int count = (configuration.hasSensorPMS1 ? 1 : 0) +
+                  (configuration.hasSensorPMS2 ? 1 : 0);
+      if (count == 1) {
+        fwMode = FW_MODE_O_1P;
+      }
+    }
+  }
+
+#else
   if (fwMode == FW_MODE_O_1PST) {
     bool pmInitSuccess = false;
     if (serial0Available) {
@@ -829,6 +922,7 @@ static void openAirInit(void) {
       }
     }
   }
+#endif
 
   /** update the PMS poll period base on fw mode and sensor available */
   if (fwMode != FW_MODE_O_1PST) {
@@ -926,7 +1020,7 @@ static void configUpdateHandle() {
       if (configuration.getLedBarBrightness() == 0) {
         ag->ledBar.setEnable(false);
       } else {
-        if(configuration.getLedBarMode() == LedBarMode::LedBarModeOff) {
+        if (configuration.getLedBarMode() == LedBarMode::LedBarModeOff) {
           ag->ledBar.setEnable(false);
         } else {
           ag->ledBar.setEnable(true);
@@ -941,8 +1035,7 @@ static void configUpdateHandle() {
     }
 
     stateMachine.executeLedBarTest();
-  }
-  else if(ag->isOpenAir()) {
+  } else if (ag->isOpenAir()) {
     stateMachine.executeLedBarTest();
   }
 
@@ -973,7 +1066,8 @@ static void updateDisplayAndLedBar(void) {
     } else {
       stateMachine.displayClearAddToDashBoard();
     }
-  } else if (apiClient.isPostToServerFailed() && configuration.isPostDataToAirGradient()) {
+  } else if (apiClient.isPostToServerFailed() &&
+             configuration.isPostDataToAirGradient()) {
     state = AgStateMachineServerLost;
   }
 
@@ -995,6 +1089,66 @@ static void updateTvoc(void) {
 }
 
 static void updatePm(void) {
+#ifdef SENSOR_SPS30
+  if (!configuration.hasSensorPMS1) {
+    return;
+  }
+
+  uint16_t mc1p0 = 0;
+  uint16_t mc2p5 = 0;
+  uint16_t mc4p0 = 0;
+  uint16_t mc10p0 = 0;
+  uint16_t nc0p5 = 0;
+  uint16_t nc1p0 = 0;
+  uint16_t nc2p5 = 0;
+  uint16_t nc4p0 = 0;
+  uint16_t nc10p0 = 0;
+  uint16_t typicalParticleSize = 0;
+
+  int16_t error = sps30.readMeasurementValuesUint16(
+      mc1p0, mc2p5, mc4p0, mc10p0, nc0p5, nc1p0, nc2p5, nc4p0, nc10p0,
+      typicalParticleSize);
+  if (error != NO_ERROR) {
+    Serial.printf("SPS30 readMeasurement failed: %d\r\n", error);
+    if (sps30FailCount < SPS30_FAIL_LIMIT) {
+      sps30FailCount++;
+    }
+    if (sps30FailCount >= SPS30_FAIL_LIMIT && sps30Connected) {
+      sps30Connected = false;
+    }
+    measurements.pm01_1 = utils::getInvalidPmValue();
+    measurements.pm25_1 = utils::getInvalidPmValue();
+    measurements.pm10_1 = utils::getInvalidPmValue();
+    measurements.pm03PCount_1 = utils::getInvalidPmValue();
+
+    if (sps30Serial != nullptr) {
+      sps30.stopMeasurement();
+      int16_t restartError = sps30.startMeasurement(
+          SPS30_OUTPUT_FORMAT_OUTPUT_FORMAT_UINT16);
+      if (restartError != NO_ERROR) {
+        Serial.printf("SPS30 restart failed: %d\r\n", restartError);
+      }
+    }
+    return;
+  }
+
+  sps30FailCount = 0;
+  if (!sps30Connected) {
+    sps30Connected = true;
+  }
+
+  measurements.pm01_1 = mc1p0;
+  measurements.pm25_1 = mc2p5;
+  measurements.pm10_1 = mc10p0;
+  measurements.pm03PCount_1 =
+      nc0p5 + nc1p0 + nc2p5 + nc4p0 + nc10p0;
+
+  Serial.println();
+  Serial.printf("PM1 ug/m3: %d\r\n", measurements.pm01_1);
+  Serial.printf("PM2.5 ug/m3: %d\r\n", measurements.pm25_1);
+  Serial.printf("PM10 ug/m3: %d\r\n", measurements.pm10_1);
+  Serial.printf("PM0.3 Count: %d\r\n", measurements.pm03PCount_1);
+#else
   bool restart = false;
   if (ag->isOne()) {
     if (ag->pms5003.connected()) {
@@ -1008,11 +1162,13 @@ static void updatePm(void) {
       Serial.printf("PM2.5 ug/m3: %d\r\n", measurements.pm25_1);
       Serial.printf("PM10 ug/m3: %d\r\n", measurements.pm10_1);
       Serial.printf("PM0.3 Count: %d\r\n", measurements.pm03PCount_1);
-      Serial.printf("PM firmware version: %d\r\n", ag->pms5003.getFirmwareVersion());
+      Serial.printf("PM firmware version: %d\r\n",
+                    ag->pms5003.getFirmwareVersion());
       ag->pms5003.resetFailCount();
     } else {
       ag->pms5003.updateFailCount();
-      Serial.printf("PMS read failed %d times\r\n", ag->pms5003.getFailCount());
+      Serial.printf("PMS read failed %d times\r\n",
+                    ag->pms5003.getFailCount());
       if (ag->pms5003.getFailCount() >= PMS_FAIL_COUNT_SET_INVALID) {
         measurements.pm01_1 = utils::getInvalidPmValue();
         measurements.pm25_1 = utils::getInvalidPmValue();
@@ -1048,13 +1204,15 @@ static void updatePm(void) {
                     ag->pms5003t_1.compensateTemp(measurements.temp_1));
       Serial.printf("[1] Relative Humidity compensated: %0.2f\r\n",
                     ag->pms5003t_1.compensateHum(measurements.hum_1));
-      Serial.printf("[1] PM firmware version: %d\r\n", ag->pms5003t_1.getFirmwareVersion());
+      Serial.printf("[1] PM firmware version: %d\r\n",
+                    ag->pms5003t_1.getFirmwareVersion());
 
       ag->pms5003t_1.resetFailCount();
     } else {
       if (configuration.hasSensorPMS1) {
         ag->pms5003t_1.updateFailCount();
-        Serial.printf("[1] PMS read failed %d times\r\n", ag->pms5003t_1.getFailCount());
+        Serial.printf("[1] PMS read failed %d times\r\n",
+                      ag->pms5003t_1.getFailCount());
 
         if (ag->pms5003t_1.getFailCount() >= PMS_FAIL_COUNT_SET_INVALID) {
           measurements.pm01_1 = utils::getInvalidPmValue();
@@ -1065,7 +1223,8 @@ static void updatePm(void) {
           measurements.hum_1 = utils::getInvalidHumidity();
         }
 
-        if (ag->pms5003t_1.getFailCount() >= ag->pms5003t_1.getFailCountMax()) {
+        if (ag->pms5003t_1.getFailCount() >=
+            ag->pms5003t_1.getFailCountMax()) {
           restart = true;
         }
       }
@@ -1092,13 +1251,15 @@ static void updatePm(void) {
                     ag->pms5003t_1.compensateTemp(measurements.temp_2));
       Serial.printf("[2] Relative Humidity compensated: %0.2f\r\n",
                     ag->pms5003t_1.compensateHum(measurements.hum_2));
-      Serial.printf("[2] PM firmware version: %d\r\n", ag->pms5003t_2.getFirmwareVersion());
+      Serial.printf("[2] PM firmware version: %d\r\n",
+                    ag->pms5003t_2.getFirmwareVersion());
 
       ag->pms5003t_2.resetFailCount();
     } else {
       if (configuration.hasSensorPMS2) {
         ag->pms5003t_2.updateFailCount();
-        Serial.printf("[2] PMS read failed %d times\r\n", ag->pms5003t_2.getFailCount());
+        Serial.printf("[2] PMS read failed %d times\r\n",
+                      ag->pms5003t_2.getFailCount());
 
         if (ag->pms5003t_2.getFailCount() >= PMS_FAIL_COUNT_SET_INVALID) {
           measurements.pm01_2 = utils::getInvalidPmValue();
@@ -1109,7 +1270,8 @@ static void updatePm(void) {
           measurements.hum_2 = utils::getInvalidHumidity();
         }
 
-        if (ag->pms5003t_2.getFailCount() >= ag->pms5003t_2.getFailCountMax()) {
+        if (ag->pms5003t_2.getFailCount() >=
+            ag->pms5003t_2.getFailCountMax()) {
           restart = true;
         }
       }
@@ -1212,16 +1374,21 @@ static void updatePm(void) {
       ag->sgp41.setCompensationTemperatureHumidity(temp, hum);
     }
   }
+#endif
 
+#ifndef SENSOR_SPS30
   if (restart) {
-    Serial.printf("PMS failure count reach to max set %d, restarting...", ag->pms5003.getFailCountMax());
+    Serial.printf("PMS failure count reach to max set %d, restarting...",
+                  ag->pms5003.getFailCountMax());
     ESP.restart();
   }
+#endif
 }
 
 static void sendDataToServer(void) {
   /** Ignore send data to server if postToAirGradient disabled */
-  if (configuration.isPostDataToAirGradient() == false || configuration.isOfflineMode()) {
+  if (configuration.isPostDataToAirGradient() == false ||
+      configuration.isOfflineMode()) {
     return;
   }
 
@@ -1259,4 +1426,39 @@ static void tempHumUpdate(void) {
     measurements.Humidity = utils::getInvalidHumidity();
     Serial.println("SHT read failed");
   }
+}
+
+static bool sps30Init(Stream &serial) {
+  sps30.begin(serial);
+  sps30.stopMeasurement();
+  int8_t serialNumber[32] = {0};
+  int8_t productType[9] = {0};
+  sps30Serial = nullptr;
+  sps30Connected = false;
+  sps30FailCount = 0;
+
+  int16_t error = sps30.readSerialNumber(serialNumber, 32);
+  if (error != NO_ERROR) {
+    Serial.println("SPS30 readSerialNumber failed");
+    return false;
+  }
+  error = sps30.readProductType(productType, 9);
+  if (error != NO_ERROR) {
+    Serial.println("SPS30 readProductType failed");
+    return false;
+  }
+  Serial.println("SPS30 serial: " + String((char *)serialNumber));
+  Serial.println("SPS30 product: " + String((char *)productType));
+
+  error = sps30.startMeasurement(SPS30_OUTPUT_FORMAT_OUTPUT_FORMAT_UINT16);
+  if (error != NO_ERROR) {
+    Serial.printf("SPS30 startMeasurement failed: %d\r\n", error);
+    return false;
+  }
+
+  sps30Serial = &serial;
+  sps30Connected = true;
+  sps30FailCount = 0;
+
+  return true;
 }
