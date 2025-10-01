@@ -40,28 +40,30 @@ public:
     DashBoardStatusOfflineMode,
   };
 
-  void setAirGradient(AirGradient *ag);
-  bool begin(void);
-  void end(void);
-  void setText(String &line1, String &line2, String &line3);
-  void setText(const char *line1, const char *line2, const char *line3);
-  void setText(String &line1, String &line2, String &line3, String &line4);
-  void setText(const char *line1, const char *line2, const char *line3,
+  virtual void setAirGradient(AirGradient *ag);
+  virtual bool begin(void);
+  virtual void end(void);
+  virtual void setText(String &line1, String &line2, String &line3);
+  virtual void setText(const char *line1, const char *line2, const char *line3);
+  virtual void setText(String &line1, String &line2, String &line3, String &line4);
+  virtual void setText(const char *line1, const char *line2, const char *line3,
                const char *line4);
-  void showDashboard(void);
-  void showDashboard(DashboardStatus status);
-  void setBrightness(int percent);
+  virtual void showDashboard(void);
+  virtual void showDashboard(DashboardStatus status);
+  virtual void setBrightness(int percent);
 #ifdef ESP32
-  void showFirmwareUpdateVersion(String version);
-  void showFirmwareUpdateProgress(int percent);
-  void showFirmwareUpdateSuccess(int count);
-  void showFirmwareUpdateFailed(void);
-  void showFirmwareUpdateSkipped(void);
-  void showFirmwareUpdateUpToDate(void);
+  virtual void showFirmwareUpdateVersion(String version);
+  virtual void showFirmwareUpdateProgress(int percent);
+  virtual void showFirmwareUpdateSuccess(int count);
+  virtual void showFirmwareUpdateFailed(void);
+  virtual void showFirmwareUpdateSkipped(void);
+  virtual void showFirmwareUpdateUpToDate(void);
 #else
 
 #endif
-  void showRebooting(void);
+  virtual void showRebooting(void);
 };
+
+
 
 #endif /** _AG_OLED_DISPLAY_H_ */

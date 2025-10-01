@@ -1,31 +1,31 @@
 #ifndef _AG_SHARP_DISPLAY_H_
 #define _AG_SHARP_DISPLAY_H_
 
-#include "AgConfigure.h"
-#include "AgValue.h"
-#include "AirGradient.h"
-#include "Main/PrintLog.h"
+#include "AgOledDisplay.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_SharpMem.h>
 #include <Arduino.h>
 
 /**
- * @brief Sharp Memory Display class similar to OledDisplay
+ * @brief Sharp Memory Display class that inherits from OledDisplay
  * Uses Adafruit_SharpMem library with 400x240 resolution
+ * Overrides all display methods to use Sharp Memory Display instead of OLED
  */
-class SharpDisplay : public PrintLog {
+class SharpDisplay : public OledDisplay {
 private:
-  Configuration &config;
-  AirGradient *ag;
-  bool isBegin = false;
   Adafruit_SharpMem *sharpDisplay = nullptr;
-  Measurements &value;
-  bool isDisplayOff = false;
+  bool sharpIsBegin = false;
+  bool sharpIsDisplayOff = false;
+  
+  // Own references to config, value, and ag (parent has them private)
+  Configuration &sharpConfig;
+  Measurements &sharpValue;
+  AirGradient *sharpAg = nullptr;
   
   // Sharp Memory Display pins (adjust these based on your hardware)
-  static const uint8_t SHARP_SCK = 14;   // Clock pin
-  static const uint8_t SHARP_MOSI = 13;  // Data pin
-  static const uint8_t SHARP_SS = 15;    // Chip select pin
+  static const uint8_t SHARP_SCK = 5;   // Clock pin
+  static const uint8_t SHARP_MOSI = 4;  // Data pin
+  static const uint8_t SHARP_SS = 3;    // Chip select pin
   
   // Display dimensions
   static const int SHARP_WIDTH = 400;
@@ -40,15 +40,7 @@ public:
   SharpDisplay(Configuration &config, Measurements &value, Stream &log);
   ~SharpDisplay();
   
-  enum DashboardStatus {
-    DashBoardStatusNone,
-    DashBoardStatusWiFiIssue,
-    DashBoardStatusServerIssue,
-    DashBoardStatusAddToDashboard,
-    DashBoardStatusDeviceId,
-    DashBoardStatusOfflineMode,
-  };
-  
+  // Override base class methods for Sharp display
   void setAirGradient(AirGradient *ag);
   bool begin(void);
   void end(void);

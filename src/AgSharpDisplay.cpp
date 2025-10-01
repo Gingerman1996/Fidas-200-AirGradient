@@ -25,16 +25,16 @@ void SharpDisplay::showTempHumSharp(bool hasStatus) {
   char buf[20];
   
   // Temperature
-  float temp = value.getCorrectedTempHum(Measurements::Temperature, 1);
+  float temp = sharpValue.getCorrectedTempHum(Measurements::Temperature, 1);
   if (utils::isValidTemperature(temp)) {
     float t = 0.0f;
-    if (config.isTemperatureUnitInF()) {
+    if (sharpConfig.isTemperatureUnitInF()) {
       t = utils::degreeC_To_F(temp);
     } else {
       t = temp;
     }
     
-    if (config.isTemperatureUnitInF()) {
+    if (sharpConfig.isTemperatureUnitInF()) {
       if (hasStatus) {
         snprintf(buf, sizeof(buf), "%0.1f", t);
       } else {
@@ -48,7 +48,7 @@ void SharpDisplay::showTempHumSharp(bool hasStatus) {
       }
     }
   } else {
-    if (config.isTemperatureUnitInF()) {
+    if (sharpConfig.isTemperatureUnitInF()) {
       snprintf(buf, sizeof(buf), "-°F");
     } else {
       snprintf(buf, sizeof(buf), "-°C");
@@ -60,7 +60,7 @@ void SharpDisplay::showTempHumSharp(bool hasStatus) {
   sharpDisplay->print(buf);
   
   // Humidity
-  int rhum = round(value.getCorrectedTempHum(Measurements::Humidity, 1));
+  int rhum = round(sharpValue.getCorrectedTempHum(Measurements::Humidity, 1));
   if (utils::isValidHumidity(rhum)) {
     snprintf(buf, sizeof(buf), "%d%%", rhum);
   } else {
@@ -108,7 +108,8 @@ void SharpDisplay::showIconSharp(int x, int y, int width, int height, const unsi
  * @param log Log stream
  */
 SharpDisplay::SharpDisplay(Configuration &config, Measurements &value, Stream &log)
-    : PrintLog(log, "SharpDisplay"), config(config), value(value) {
+    : OledDisplay(config, value, log), sharpConfig(config), sharpValue(value) {
+  logInfo("SharpDisplay constructor");
 }
 
 /**
@@ -122,19 +123,26 @@ SharpDisplay::~SharpDisplay() {
 }
 
 /**
+ * @brief Set AirGradient instance
+ *
+ * @param ag Point to AirGradient instance
+ */
+void SharpDisplay::setAirGradient(AirGradient *ag) { this->sharpAg = ag; }
+
+/**
  * @brief Initialize Sharp Memory Display
  * 
  * @return true Success
  * @return false Failure
  */
 bool SharpDisplay::begin(void) {
-  if (isBegin) {
+  if (sharpIsBegin) {
     logWarning("Sharp display already initialized");
     return true;
   }
   
-  // Create Sharp Memory Display instance (400x240)
-  sharpDisplay = new Adafruit_SharpMem(SHARP_SCK, SHARP_MOSI, SHARP_SS, SHARP_WIDTH, SHARP_HEIGHT);
+  // Create Sharp Memory Display instance (400x240) with 4MHz SPI speed
+  sharpDisplay = new Adafruit_SharpMem(SHARP_SCK, SHARP_MOSI, SHARP_SS, SHARP_WIDTH, SHARP_HEIGHT, 4000000);
   
   if (sharpDisplay == nullptr) {
     logError("Failed to create Sharp display instance");
@@ -156,7 +164,7 @@ bool SharpDisplay::begin(void) {
   sharpDisplay->setTextWrap(true);
   sharpDisplay->refresh();
   
-  isBegin = true;
+  sharpIsBegin = true;
   logInfo("Sharp display initialized successfully (400x240)");
   return true;
 }
@@ -165,7 +173,7 @@ bool SharpDisplay::begin(void) {
  * @brief De-initialize Sharp Memory Display
  */
 void SharpDisplay::end(void) {
-  if (!isBegin) {
+  if (!sharpIsBegin) {
     logWarning("Sharp display already ended");
     return;
   }
@@ -177,16 +185,9 @@ void SharpDisplay::end(void) {
     sharpDisplay = nullptr;
   }
   
-  isBegin = false;
+  sharpIsBegin = false;
   logInfo("Sharp display ended");
 }
-
-/**
- * @brief Set AirGradient instance
- *
- * @param ag Point to AirGradient instance
- */
-void SharpDisplay::setAirGradient(AirGradient *ag) { this->ag = ag; }
 
 /**
  * @brief Display text on 3 lines (String overload)
@@ -207,7 +208,7 @@ void SharpDisplay::setText(String &line1, String &line2, String &line3) {
  * @param line3 Third line text
  */
 void SharpDisplay::setText(const char *line1, const char *line2, const char *line3) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -247,7 +248,7 @@ void SharpDisplay::setText(String &line1, String &line2, String &line3, String &
  * @param line4 Fourth line text
  */
 void SharpDisplay::setText(const char *line1, const char *line2, const char *line3, const char *line4) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -282,13 +283,14 @@ void SharpDisplay::showDashboard(void) {
  * @param status Dashboard status to display
  */
 void SharpDisplay::showDashboard(DashboardStatus status) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
-  Configuration &config = this->config;
-  Measurements &value = this->value;
-  AirGradient *ag = this->ag;
+  // Use own references
+  Configuration &config = sharpConfig;
+  Measurements &value = sharpValue;
+  AirGradient *ag = sharpAg;
   
   char strBuf[32];
   const int icon_pos_x = SHARP_WIDTH - 30;
@@ -314,7 +316,11 @@ void SharpDisplay::showDashboard(DashboardStatus status) {
       sharpDisplay->refresh();
       return;
     case DashBoardStatusDeviceId:
-      setCentralTextSharp(120, ag->deviceId().c_str());
+      if (ag) {
+        setCentralTextSharp(120, ag->deviceId().c_str());
+      } else {
+        setCentralTextSharp(120, "No Device ID");
+      }
       sharpDisplay->refresh();
       return;
     case DashBoardStatusOfflineMode:
@@ -369,7 +375,11 @@ void SharpDisplay::showDashboard(DashboardStatus status) {
       pm25 = round(value.getCorrectedPM25(true));
     }
     if (config.isPmStandardInUSAQI()) {
-      snprintf(strBuf, sizeof(strBuf), "%d", ag->pms5003.convertPm25ToUsAqi(pm25));
+      if (ag) {
+        snprintf(strBuf, sizeof(strBuf), "%d", ag->pms5003.convertPm25ToUsAqi(pm25));
+      } else {
+        snprintf(strBuf, sizeof(strBuf), "%d", pm25);
+      }
     } else {
       snprintf(strBuf, sizeof(strBuf), "%d", pm25);
     }
@@ -433,11 +443,11 @@ void SharpDisplay::setBrightness(int percent) {
   }
   
   if (percent == 0) {
-    isDisplayOff = true;
+    sharpIsDisplayOff = true;
     sharpDisplay->clearDisplay();
     sharpDisplay->refresh();
   } else {
-    isDisplayOff = false;
+    sharpIsDisplayOff = false;
     // Sharp Memory Display doesn't have brightness control
     // It's either on or off. We could implement PWM backlight control
     // if your hardware has a backlight with PWM control
@@ -451,7 +461,7 @@ void SharpDisplay::setBrightness(int percent) {
  * @param version Version string
  */
 void SharpDisplay::showFirmwareUpdateVersion(String version) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -471,7 +481,7 @@ void SharpDisplay::showFirmwareUpdateVersion(String version) {
  * @param percent Progress percentage
  */
 void SharpDisplay::showFirmwareUpdateProgress(int percent) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -503,7 +513,7 @@ void SharpDisplay::showFirmwareUpdateProgress(int percent) {
  * @param count Countdown seconds
  */
 void SharpDisplay::showFirmwareUpdateSuccess(int count) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -524,7 +534,7 @@ void SharpDisplay::showFirmwareUpdateSuccess(int count) {
  * @brief Show firmware update failed
  */
 void SharpDisplay::showFirmwareUpdateFailed(void) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -542,7 +552,7 @@ void SharpDisplay::showFirmwareUpdateFailed(void) {
  * @brief Show firmware update skipped
  */
 void SharpDisplay::showFirmwareUpdateSkipped(void) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -559,7 +569,7 @@ void SharpDisplay::showFirmwareUpdateSkipped(void) {
  * @brief Show firmware update is up to date
  */
 void SharpDisplay::showFirmwareUpdateUpToDate(void) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
@@ -577,7 +587,7 @@ void SharpDisplay::showFirmwareUpdateUpToDate(void) {
  * @brief Show rebooting message
  */
 void SharpDisplay::showRebooting(void) {
-  if (isDisplayOff || !sharpDisplay) {
+  if (sharpIsDisplayOff || !sharpDisplay) {
     return;
   }
   
