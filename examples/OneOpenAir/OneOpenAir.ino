@@ -28,6 +28,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 */
 #include "AgConfigure.h"
 #include "AgSchedule.h"
+#include "AgOledDisplay.h"
 #include "AgStateMachine.h"
 #include "AgValue.h"
 #include "AgWiFiConnector.h"
