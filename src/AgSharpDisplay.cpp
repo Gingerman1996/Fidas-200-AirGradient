@@ -38,13 +38,13 @@ void SharpDisplay::showTempHumSharp(bool hasStatus) {
       if (hasStatus) {
         snprintf(buf, sizeof(buf), "%0.1f", t);
       } else {
-        snprintf(buf, sizeof(buf), "%0.1f°F", t);
+        snprintf(buf, sizeof(buf), "%0.1fF", t);
       }
     } else {
       if (hasStatus) {
         snprintf(buf, sizeof(buf), "%.1f", t);
       } else {
-        snprintf(buf, sizeof(buf), "%.1f°C", t);
+        snprintf(buf, sizeof(buf), "%.1fC", t);
       }
     }
   } else {
@@ -357,7 +357,7 @@ void SharpDisplay::showDashboard(DashboardStatus status) {
   sharpDisplay->setCursor(col1_x, value_y);
   sharpDisplay->print(strBuf);
   
-  sharpDisplay->setTextSize(1);
+  sharpDisplay->setTextSize(2);
   sharpDisplay->setCursor(col1_x, unit_y);
   sharpDisplay->print("ppm");
   
@@ -391,13 +391,64 @@ void SharpDisplay::showDashboard(DashboardStatus status) {
   sharpDisplay->setCursor(col2_x, value_y);
   sharpDisplay->print(strBuf);
   
-  sharpDisplay->setTextSize(1);
+  sharpDisplay->setTextSize(2);
   sharpDisplay->setCursor(col2_x, unit_y);
   if (config.isPmStandardInUSAQI()) {
     sharpDisplay->print("AQI");
   } else {
     sharpDisplay->print("ug/m3");
   }
+  
+  // Show PM1, PM10, and particle count under PM2.5
+  sharpDisplay->setTextSize(2);
+  int detail_y = unit_y + 30;
+  
+  // PM1.0 - use get() instead of getAverage()
+  int pm01 = value.get(Measurements::PM01);
+  if (utils::isValidPm(pm01)) {
+    snprintf(strBuf, sizeof(strBuf), "PM1:%d", pm01);
+  } else {
+    snprintf(strBuf, sizeof(strBuf), "PM1:-");
+  }
+  sharpDisplay->setCursor(col2_x, detail_y);
+  sharpDisplay->print(strBuf);
+  
+  // PM10 - use get() instead of getAverage()
+  int pm10 = value.get(Measurements::PM10);
+  if (utils::isValidPm(pm10)) {
+    snprintf(strBuf, sizeof(strBuf), "PM10:%d", pm10);
+  } else {
+    snprintf(strBuf, sizeof(strBuf), "PM10:-");
+  }
+  sharpDisplay->setCursor(col2_x, detail_y + 25);
+  sharpDisplay->print(strBuf);
+  
+  // Total Particle count - sum of all particle counts
+  int pc_total = 0;
+  bool has_valid_pc = false;
+  
+  int pc03 = value.get(Measurements::PM03_PC);
+  int pc05 = value.get(Measurements::PM05_PC);
+  int pc1 = value.get(Measurements::PM01_PC);
+  int pc25 = value.get(Measurements::PM25_PC);
+  int pc5 = value.get(Measurements::PM5_PC);
+  int pc10 = value.get(Measurements::PM10_PC);
+  
+  // Sum all valid particle counts
+  if (pc03 >= 0) { pc_total += pc03; has_valid_pc = true; }
+  if (pc05 >= 0) { pc_total += pc05; has_valid_pc = true; }
+  if (pc1 >= 0) { pc_total += pc1; has_valid_pc = true; }
+  if (pc25 >= 0) { pc_total += pc25; has_valid_pc = true; }
+  if (pc5 >= 0) { pc_total += pc5; has_valid_pc = true; }
+  if (pc10 >= 0) { pc_total += pc10; has_valid_pc = true; }
+  
+  if (has_valid_pc) {
+    snprintf(strBuf, sizeof(strBuf), "PC:%d", pc_total);
+  } else {
+    snprintf(strBuf, sizeof(strBuf), "PC:-");
+  }
+  sharpDisplay->setCursor(col2_x, detail_y + 50);
+  sharpDisplay->print(strBuf);
   
   // Draw vertical separator
   sharpDisplay->drawLine(270, 45, 270, SHARP_HEIGHT, 0);
