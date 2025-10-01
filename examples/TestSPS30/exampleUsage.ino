@@ -37,6 +37,8 @@
  */
 #include <Arduino.h>
 #include <SensirionUartSps30.h>
+#include <Wire.h>
+#include "../../src/Libraries/U8g2/src/U8g2lib.h"
 
 // Adjust as needed for you Arduino board.
 // [Serial, Serial1, Serial2, etc.]
@@ -47,111 +49,189 @@
 #endif
 #define NO_ERROR 0
 
+#define WDR_PIN 2
+
+/** I2C pins for display */
+#define I2C_SDA_PIN 7
+#define I2C_SCL_PIN 6
+#define OLED_I2C_ADDR 0x3C
+
 SensirionUartSps30 sensor;
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
 static char errorMessage[64];
 static int16_t error;
 
+// Function to update display with PM values
+void updateDisplay(uint16_t pm1, uint16_t pm25, uint16_t pm10, uint16_t pm4, uint16_t nc0p5);
+
 void setup() {
-  delay(2000);
-  // initialize serial interface for logging
-  Serial.begin(115200);
-  while (!Serial) {
-    delay(100);
-  }
 
-  // initialize serial interface for sensor communication
-  SENSOR_SERIAL_INTERFACE.begin(115200);
-  while (!SENSOR_SERIAL_INTERFACE) {
-    delay(100);
-  }
+    // initialize serial interface for logging
+    Serial.begin(115200);
+    while (!Serial) {
+        delay(100);
+    }
 
-  sensor.begin(SENSOR_SERIAL_INTERFACE);
+    pinMode(WDR_PIN, OUTPUT);
 
-  sensor.stopMeasurement();
-  int8_t serialNumber[32] = {0};
-  int8_t productType[9] = {0};
-  error = sensor.readSerialNumber(serialNumber, 32);
-  if (error != NO_ERROR) {
-    Serial.print("Error trying to execute readSerialNumber(): ");
-    errorToString(error, errorMessage, sizeof errorMessage);
-    Serial.println(errorMessage);
-    return;
-  }
-  Serial.print("serialNumber: ");
-  Serial.print((const char *)serialNumber);
-  Serial.println();
-  error = sensor.readProductType(productType, 9);
-  if (error != NO_ERROR) {
-    Serial.print("Error trying to execute readProductType(): ");
-    errorToString(error, errorMessage, sizeof errorMessage);
-    Serial.println(errorMessage);
-    return;
-  }
-  Serial.print("productType: ");
-  Serial.print((const char *)productType);
-  Serial.println();
+    // Initialize I2C for display
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    
+    // Initialize display
+    u8g2.begin();
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    u8g2.drawStr(0, 15, "SPS30 PM Monitor");
+    u8g2.drawStr(0, 30, "Initializing...");
+    u8g2.sendBuffer();
+    delay(2000);
+
+    // initialize serial interface for sensor communication
+    SENSOR_SERIAL_INTERFACE.begin(115200);
+    while (!SENSOR_SERIAL_INTERFACE) {
+        delay(100);
+    }
+
+    sensor.begin(SENSOR_SERIAL_INTERFACE);
+
+    sensor.stopMeasurement();
+    int8_t serialNumber[32] = {0};
+    int8_t productType[9] = {0};
+    error = sensor.readSerialNumber(serialNumber, 32);
+    if (error != NO_ERROR) {
+        Serial.print("Error trying to execute readSerialNumber(): ");
+        errorToString(error, errorMessage, sizeof errorMessage);
+        Serial.println(errorMessage);
+        return;
+    }
+    Serial.print("serialNumber: ");
+    Serial.print((const char*)serialNumber);
+    Serial.println();
+    error = sensor.readProductType(productType, 9);
+    if (error != NO_ERROR) {
+        Serial.print("Error trying to execute readProductType(): ");
+        errorToString(error, errorMessage, sizeof errorMessage);
+        Serial.println(errorMessage);
+        return;
+    }
+    Serial.print("productType: ");
+    Serial.print((const char*)productType);
+    Serial.println();
+    error = sensor.startMeasurement(SPS30_OUTPUT_FORMAT_OUTPUT_FORMAT_UINT16);
+    if (error != NO_ERROR) {
+        Serial.print("Error trying to execute startMeasurement(): ");
+        errorToString(error, errorMessage, sizeof errorMessage);
+        Serial.println(errorMessage);
+        return;
+    }
 }
 
 void loop() {
 
-  error = sensor.startMeasurement(SPS30_OUTPUT_FORMAT_OUTPUT_FORMAT_UINT16);
-  if (error != NO_ERROR) {
-    Serial.print("Error trying to execute startMeasurement(): ");
-    errorToString(error, errorMessage, sizeof errorMessage);
-    Serial.println(errorMessage);
-    return;
-  }
-  uint16_t mc1p0 = 0;
-  uint16_t mc2p5 = 0;
-  uint16_t mc4p0 = 0;
-  uint16_t mc10p0 = 0;
-  uint16_t nc0p5 = 0;
-  uint16_t nc1p0 = 0;
-  uint16_t nc2p5 = 0;
-  uint16_t nc4p0 = 0;
-  uint16_t nc10p0 = 0;
-  uint16_t typicalParticleSize = 0;
-  delay(1000);
-  error = sensor.readMeasurementValuesUint16(mc1p0, mc2p5, mc4p0, mc10p0, nc0p5,
-                                             nc1p0, nc2p5, nc4p0, nc10p0,
-                                             typicalParticleSize);
-  if (error != NO_ERROR) {
-    Serial.print("Error trying to execute readMeasurementValuesUint16(): ");
-    errorToString(error, errorMessage, sizeof errorMessage);
-    Serial.println(errorMessage);
-    return;
-  }
-  Serial.print("mc1p0: ");
-  Serial.print(mc1p0);
-  Serial.print("\t");
-  Serial.print("mc2p5: ");
-  Serial.print(mc2p5);
-  Serial.print("\t");
-  Serial.print("mc4p0: ");
-  Serial.print(mc4p0);
-  Serial.print("\t");
-  Serial.print("mc10p0: ");
-  Serial.print(mc10p0);
-  Serial.print("\t");
-  Serial.print("nc0p5: ");
-  Serial.print(nc0p5);
-  Serial.print("\t");
-  Serial.print("nc1p0: ");
-  Serial.print(nc1p0);
-  Serial.print("\t");
-  Serial.print("nc2p5: ");
-  Serial.print(nc2p5);
-  Serial.print("\t");
-  Serial.print("nc4p0: ");
-  Serial.print(nc4p0);
-  Serial.print("\t");
-  Serial.print("nc10p0: ");
-  Serial.print(nc10p0);
-  Serial.print("\t");
-  Serial.print("typicalParticleSize: ");
-  Serial.print(typicalParticleSize);
-  Serial.println();
+    uint16_t mc1p0 = 0;
+    uint16_t mc2p5 = 0;
+    uint16_t mc4p0 = 0;
+    uint16_t mc10p0 = 0;
+    uint16_t nc0p5 = 0;
+    uint16_t nc1p0 = 0;
+    uint16_t nc2p5 = 0;
+    uint16_t nc4p0 = 0;
+    uint16_t nc10p0 = 0;
+    uint16_t typicalParticleSize = 0;
+    delay(1000);
+    error = sensor.readMeasurementValuesUint16(mc1p0, mc2p5, mc4p0, mc10p0,
+                                               nc0p5, nc1p0, nc2p5, nc4p0,
+                                               nc10p0, typicalParticleSize);
+    if (error != NO_ERROR) {
+        Serial.print("Error trying to execute readMeasurementValuesUint16(): ");
+        errorToString(error, errorMessage, sizeof errorMessage);
+        Serial.println(errorMessage);
+        return;
+    }
+    Serial.print("mc1p0: ");
+    Serial.print(mc1p0);
+    Serial.print("\t");
+    Serial.print("mc2p5: ");
+    Serial.print(mc2p5);
+    Serial.print("\t");
+    Serial.print("mc4p0: ");
+    Serial.print(mc4p0);
+    Serial.print("\t");
+    Serial.print("mc10p0: ");
+    Serial.print(mc10p0);
+    Serial.print("\t");
+    Serial.print("nc0p5: ");
+    Serial.print(nc0p5);
+    Serial.print("\t");
+    Serial.print("nc1p0: ");
+    Serial.print(nc1p0);
+    Serial.print("\t");
+    Serial.print("nc2p5: ");
+    Serial.print(nc2p5);
+    Serial.print("\t");
+    Serial.print("nc4p0: ");
+    Serial.print(nc4p0);
+    Serial.print("\t");
+    Serial.print("nc10p0: ");
+    Serial.print(nc10p0);
+    Serial.print("\t");
+    Serial.print("typicalParticleSize: ");
+    Serial.print(typicalParticleSize);
+    Serial.println();
 
-  error = sensor.stopMeasurement();
+    // Update display with PM values
+    updateDisplay(mc1p0, mc2p5, mc10p0, mc4p0, nc0p5);
+
+    digitalWrite(WDR_PIN, HIGH);
+    delay(25);
+    digitalWrite(WDR_PIN, LOW);
+
+    Serial.println("Reset");
+}
+
+// Function to update display with PM values
+void updateDisplay(uint16_t pm1, uint16_t pm25, uint16_t pm10, uint16_t pm4, uint16_t nc0p5) {
+    char buffer[32];
+    
+    u8g2.clearBuffer();
+    
+    // Title
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    u8g2.drawStr(20, 10, "PM Readings");
+    
+    // Draw separator line
+    u8g2.drawLine(0, 12, 128, 12);
+    
+    // PM1.0 value
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(5, 25, "PM1.0:");
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    snprintf(buffer, sizeof(buffer), "%d ug/m3", pm1);
+    u8g2.drawStr(45, 25, buffer);
+    
+    // PM2.5 value
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(5, 38, "PM2.5:");
+    u8g2.setFont(u8g2_font_ncenB10_tr);
+    snprintf(buffer, sizeof(buffer), "%d", pm25);
+    u8g2.drawStr(45, 38, buffer);
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(85, 38, "ug/m3");
+    
+    // PM4.0 value
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(5, 51, "PM4.0:");
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    snprintf(buffer, sizeof(buffer), "%d ug/m3", pm4);
+    u8g2.drawStr(45, 51, buffer);
+    
+    // PM10 value
+    u8g2.setFont(u8g2_font_6x10_tf);
+    u8g2.drawStr(5, 64, "PM10:");
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    snprintf(buffer, sizeof(buffer), "%d ug/m3", pm10);
+    u8g2.drawStr(40, 64, buffer);
+    
+    u8g2.sendBuffer();
 }
