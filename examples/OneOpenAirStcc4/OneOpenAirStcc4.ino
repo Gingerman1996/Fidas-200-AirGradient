@@ -53,9 +53,12 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "Libraries/airgradient-client/src/cellularModuleA7672xx.h"
 #include "Libraries/airgradient-client/src/airgradientCellularClient.h"
 #include "Libraries/airgradient-client/src/airgradientWifiClient.h"
+#ifndef DISABLE_OTA
 #include "Libraries/airgradient-ota/src/airgradientOta.h"
 #include "Libraries/airgradient-ota/src/airgradientOtaWifi.h"
 #include "Libraries/airgradient-ota/src/airgradientOtaCellular.h"
+#endif
+#include <SensirionI2cStcc4.h>
 #include "esp_system.h"
 #include "freertos/projdefs.h"
 
@@ -110,6 +113,8 @@ static LocalServer localServer(Serial, openMetrics, measurements, configuration,
 static AgSerial *agSerial;
 static CellularModule *cellularCard;
 static AirgradientClient *agClient;
+static SensirionI2cStcc4 stcc4;
+static bool hasSensorStcc4 = false;
 
 enum NetworkOption {
   UseWifi,
@@ -143,6 +148,10 @@ static void updatePm(void);
 static void sendDataToServer(void);
 static void tempHumUpdate(void);
 static void co2Update(void);
+static bool stcc4Init(void);
+static void setStcc4TempHum(float temp, float rhum);
+static void setInvalidStcc4TempHum(void);
+static void stcc4CalibrateAmbientCO2(int16_t targetPpm = 400);
 static void printMeasurements();
 static void mdnsInit(void);
 static void createMqttTask(void);
@@ -152,8 +161,11 @@ static void wdgFeedUpdate(void);
 static void ledBarEnabledUpdate(void);
 static bool sgp41Init(void);
 static void checkForFirmwareUpdate(void);
+// OTA callbacks only declared when OTA is enabled
+#ifndef DISABLE_OTA
 static void otaHandlerCallback(AirgradientOTA::OtaResult result, const char *msg);
 static void displayExecuteOta(AirgradientOTA::OtaResult result, String msg, int processing);
+#endif
 static int calculateMaxPeriod(int updateInterval);
 static void setMeasurementMaxPeriod();
 static void newMeasurementCycle();
@@ -184,9 +196,6 @@ void setup() {
   pinMode(GPIO_EXPANSION_CARD_POWER, OUTPUT);
   digitalWrite(GPIO_EXPANSION_CARD_POWER, HIGH);
 
-  /** Print device ID into log */
-  Serial.println("Serial nr: " + ag->deviceId());
-
   // Set reason why esp is reset
   esp_reset_reason_t reason = esp_reset_reason();
   measurements.setResetReason(reason);
@@ -208,6 +217,7 @@ void setup() {
     ag = new AirGradient(BoardType::OPEN_AIR_OUTDOOR);
   }
   Serial.println("Detected " + ag->getBoardName());
+  Serial.println("Serial nr: " + ag->deviceId());
 
   configuration.setAirGradient(ag);
   oledDisplay.setAirGradient(ag);
@@ -333,14 +343,14 @@ void loop() {
     measurementSchedule.run();
   }
 
-  if (configuration.hasSensorS8) {
+  if (hasSensorStcc4 || configuration.hasSensorS8) {
     co2Schedule.run();
   }
   if (configuration.hasSensorPMS1 || configuration.hasSensorPMS2) {
     pmsSchedule.run();
   }
   if (ag->isOne()) {
-    if (configuration.hasSensorSHT) {
+    if (configuration.hasSensorSHT && !hasSensorStcc4) {
       tempHumSchedule.run();
     }
   }
@@ -373,14 +383,42 @@ void loop() {
 
   if (configuration.isCommandRequested()) {
     // Each state machine already has an independent request command check
-    stateMachine.executeCo2Calibration();
+    if (!hasSensorStcc4) {
+      stateMachine.executeCo2Calibration();
+    } else if (hasSensorStcc4 && configuration.isCo2CalibrationRequested()) {
+      stcc4CalibrateAmbientCO2();
+    }
     stateMachine.executeLedBarTest();
   }
 }
 
 static void co2Update(void) {
+  if (hasSensorStcc4) {
+    int16_t co2 = 0;
+    float temp = utils::getInvalidTemperature();
+    float rhum = utils::getInvalidHumidity();
+    uint16_t status = 0;
+
+    int16_t error = stcc4.readMeasurement(co2, temp, rhum, status);
+    (void)status;
+    if (error != 0 || !utils::isValidCO2(co2)) {
+      Serial.printf("STCC4 read error: %d\n", error);
+      measurements.update(Measurements::CO2, utils::getInvalidCO2());
+      setInvalidStcc4TempHum();
+      return;
+    }
+
+    measurements.update(Measurements::CO2, co2);
+    if (utils::isValidTemperature(temp) && utils::isValidHumidity(rhum)) {
+      setStcc4TempHum(temp, rhum);
+    } else {
+      setInvalidStcc4TempHum();
+    }
+    return;
+  }
+
   if (!configuration.hasSensorS8) {
-    // Device don't have S8 sensor
+    // Device doesn't have a CO2 sensor available
     return;
   }
 
@@ -565,7 +603,44 @@ static bool sgp41Init(void) {
   return false;
 }
 
+static bool stcc4Init(void) {
+  stcc4.begin(Wire, STCC4_I2C_ADDR_64);
+
+  // Ensure sensor is in a known state before starting measurements
+  stcc4.stopContinuousMeasurement();
+
+  int16_t error = stcc4.startContinuousMeasurement();
+  if (error != 0) {
+    Serial.printf("STCC4 init failed with error: %d\n", error);
+    hasSensorStcc4 = false;
+    return false;
+  }
+
+  hasSensorStcc4 = true;
+  return true;
+}
+
+static void stcc4CalibrateAmbientCO2(int16_t targetPpm) {
+  Serial.println("Starting CO2 calibration (STCC4) with ambient reference");
+  // หยุดการวัดต่อเนื่องก่อนทำ FRC ตามคู่มือ
+  stcc4.stopContinuousMeasurement();
+  delay(1200);
+  int16_t frcCorrection = 0;
+  int16_t err = stcc4.performForcedRecalibration(targetPpm, frcCorrection);
+  if (err == 0 && frcCorrection != 0xFFFF) {
+    Serial.printf("Calibration succeeded (target=%d ppm, correction=%d)\n", targetPpm, frcCorrection);
+  } else {
+    Serial.printf("Calibration failed (err=%d, correction=%d)\n", err, frcCorrection);
+  }
+  delay(200);
+  stcc4.startContinuousMeasurement();
+}
+
 void checkForFirmwareUpdate(void) {
+#ifdef DISABLE_OTA
+  Serial.println("OTA disabled; skipping firmware update check");
+  return;
+#else
   if (configuration.isCloudConnectionDisabled()) {
     Serial.println("Cloud connection is disabled, skip firmware update");
     return;
@@ -600,8 +675,10 @@ void checkForFirmwareUpdate(void) {
 
   delete agOta;
   Serial.println();
+#endif
 }
 
+#ifndef DISABLE_OTA
 void otaHandlerCallback(AirgradientOTA::OtaResult result, const char *msg) {
   switch (result) {
   case AirgradientOTA::Starting: {
@@ -700,6 +777,7 @@ static void displayExecuteOta(AirgradientOTA::OtaResult result, String msg, int 
     break;
   }
 }
+#endif
 
 static void sendDataToAg() {
   /** Change oledDisplay and led state */
@@ -809,18 +887,15 @@ static void oneIndoorInit(void) {
     dispSensorNotFound("SGP41");
   }
 
-  /** INit SHT */
-  if (ag->sht.begin(Wire) == false) {
-    Serial.println("SHTx sensor not found");
-    configuration.hasSensorSHT = false;
-    dispSensorNotFound("SHT");
-  }
-
-  /** Init S8 CO2 sensor */
-  if (ag->s8.begin(Serial1) == false) {
-    Serial.println("CO2 S8 sensor not found");
+  /** Init STCC4 CO2 + T/H sensor */
+  if (!stcc4Init()) {
+    Serial.println("STCC4 sensor not found");
     configuration.hasSensorS8 = false;
-    dispSensorNotFound("S8");
+    configuration.hasSensorSHT = false;
+    dispSensorNotFound("STCC4");
+  } else {
+    configuration.hasSensorS8 = true;
+    configuration.hasSensorSHT = true;
   }
 
   /** Init PMS5003 */
@@ -841,32 +916,24 @@ static void openAirInit(void) {
   ag->button.begin();
   ag->statusLed.begin();
 
-  /** detect sensor: PMS5003, PMS5003T, SGP41 and S8 */
+  /** detect sensor: PMS5003, PMS5003T, SGP41 and STCC4 */
   /**
-   * Serial1 and Serial0 is use for connect S8 and PM sensor or both PM
+   * Serial1 and Serial0 is use for connect PM sensor
    */
   bool serial1Available = true;
   bool serial0Available = true;
 
-  if (ag->s8.begin(Serial1) == false) {
-    Serial1.end();
-    delay(200);
-    Serial.println("Can not detect S8 on Serial1, try on Serial0");
-    /** Check on other port */
-    if (ag->s8.begin(Serial0) == false) {
-      configuration.hasSensorS8 = false;
+  if (!stcc4Init()) {
+    configuration.hasSensorS8 = false;
+    configuration.hasSensorSHT = false;
+    hasSensorStcc4 = false;
 
-      Serial.println("CO2 S8 sensor not found");
-      Serial.println("Can not detect S8 run mode 'PPT'");
-      fwMode = FW_MODE_O_1PPT;
-      delay(200);
-    } else {
-      Serial.println("Found S8 on Serial0");
-      serial0Available = false;
-    }
+    Serial.println("STCC4 sensor not found");
+    Serial.println("Run mode 'PPT' (no CO2)");
+    fwMode = FW_MODE_O_1PPT;
   } else {
-    Serial.println("Found S8 on Serial1");
-    serial1Available = false;
+    configuration.hasSensorS8 = true;
+    configuration.hasSensorSHT = true;
   }
 
   if (sgp41Init() == false) {
@@ -943,17 +1010,6 @@ static void boardInit(void) {
     oneIndoorInit();
   } else {
     openAirInit();
-  }
-
-  /** Set S8 CO2 abc days period */
-  if (configuration.hasSensorS8) {
-    if (ag->s8.setAbcPeriod(configuration.getCO2CalibrationAbcDays() * 24)) {
-      Serial.println("Set S8 AbcDays successful");
-    } else {
-      Serial.println("Set S8 AbcDays failure");
-    }
-
-    ag->s8.printInformation();
   }
 
   localServer.setFwMode(fwMode);
@@ -1292,8 +1348,10 @@ static void updatePm(void) {
       measurements.update(Measurements::PM05_PC, ag->pms5003t_1.getPm05ParticleCount(), channel);
       measurements.update(Measurements::PM01_PC, ag->pms5003t_1.getPm01ParticleCount(), channel);
       measurements.update(Measurements::PM25_PC, ag->pms5003t_1.getPm25ParticleCount(), channel);
-      measurements.update(Measurements::Temperature, ag->pms5003t_1.getTemperature(), channel);
-      measurements.update(Measurements::Humidity, ag->pms5003t_1.getRelativeHumidity(), channel);
+      if (!hasSensorStcc4) {
+        measurements.update(Measurements::Temperature, ag->pms5003t_1.getTemperature(), channel);
+        measurements.update(Measurements::Humidity, ag->pms5003t_1.getRelativeHumidity(), channel);
+      }
 
       // flag that new valid PMS value exists
       newPMS1Value = true;
@@ -1309,8 +1367,10 @@ static void updatePm(void) {
       measurements.update(Measurements::PM05_PC, utils::getInvalidPmValue(), channel);
       measurements.update(Measurements::PM01_PC, utils::getInvalidPmValue(), channel);
       measurements.update(Measurements::PM25_PC, utils::getInvalidPmValue(), channel);
-      measurements.update(Measurements::Temperature, utils::getInvalidTemperature(), channel);
-      measurements.update(Measurements::Humidity, utils::getInvalidHumidity(), channel);
+      if (!hasSensorStcc4) {
+        measurements.update(Measurements::Temperature, utils::getInvalidTemperature(), channel);
+        measurements.update(Measurements::Humidity, utils::getInvalidHumidity(), channel);
+      }
     }
   }
 
@@ -1328,8 +1388,10 @@ static void updatePm(void) {
       measurements.update(Measurements::PM05_PC, ag->pms5003t_2.getPm05ParticleCount(), channel);
       measurements.update(Measurements::PM01_PC, ag->pms5003t_2.getPm01ParticleCount(), channel);
       measurements.update(Measurements::PM25_PC, ag->pms5003t_2.getPm25ParticleCount(), channel);
-      measurements.update(Measurements::Temperature, ag->pms5003t_2.getTemperature(), channel);
-      measurements.update(Measurements::Humidity, ag->pms5003t_2.getRelativeHumidity(), channel);
+      if (!hasSensorStcc4) {
+        measurements.update(Measurements::Temperature, ag->pms5003t_2.getTemperature(), channel);
+        measurements.update(Measurements::Humidity, ag->pms5003t_2.getRelativeHumidity(), channel);
+      }
 
       // flag that new valid PMS value exists
       newPMS2Value = true;
@@ -1345,12 +1407,14 @@ static void updatePm(void) {
       measurements.update(Measurements::PM05_PC, utils::getInvalidPmValue(), channel);
       measurements.update(Measurements::PM01_PC, utils::getInvalidPmValue(), channel);
       measurements.update(Measurements::PM25_PC, utils::getInvalidPmValue(), channel);
-      measurements.update(Measurements::Temperature, utils::getInvalidTemperature(), channel);
-      measurements.update(Measurements::Humidity, utils::getInvalidHumidity(), channel);
+      if (!hasSensorStcc4) {
+        measurements.update(Measurements::Temperature, utils::getInvalidTemperature(), channel);
+        measurements.update(Measurements::Humidity, utils::getInvalidHumidity(), channel);
+      }
     }
   }
 
-  if (configuration.hasSensorSGP) {
+  if (configuration.hasSensorSGP && !hasSensorStcc4) {
     float temp, hum;
     if (newPMS1Value && newPMS2Value) {
       // Both PMS has new valid value
@@ -1465,6 +1529,12 @@ void sendDataToServer(void) {
 }
 
 static void tempHumUpdate(void) {
+  if (hasSensorStcc4) {
+    // STCC4 provides temperature and humidity together with CO2
+    co2Update();
+    return;
+  }
+
   delay(100);
   if (ag->sht.measure()) {
     float temp = ag->sht.getTemperature();
@@ -1484,11 +1554,47 @@ static void tempHumUpdate(void) {
   }
 }
 
+static void setStcc4TempHum(float temp, float rhum) {
+  measurements.update(Measurements::Temperature, temp);
+  measurements.update(Measurements::Humidity, rhum);
+
+  if (!ag->isOne()) {
+    if (configuration.hasSensorPMS1) {
+      measurements.update(Measurements::Temperature, temp, 1);
+      measurements.update(Measurements::Humidity, rhum, 1);
+    }
+    if (configuration.hasSensorPMS2) {
+      measurements.update(Measurements::Temperature, temp, 2);
+      measurements.update(Measurements::Humidity, rhum, 2);
+    }
+  }
+
+  if (configuration.hasSensorSGP) {
+    ag->sgp41.setCompensationTemperatureHumidity(temp, rhum);
+  }
+}
+
+static void setInvalidStcc4TempHum(void) {
+  measurements.update(Measurements::Temperature, utils::getInvalidTemperature());
+  measurements.update(Measurements::Humidity, utils::getInvalidHumidity());
+
+  if (!ag->isOne()) {
+    if (configuration.hasSensorPMS1) {
+      measurements.update(Measurements::Temperature, utils::getInvalidTemperature(), 1);
+      measurements.update(Measurements::Humidity, utils::getInvalidHumidity(), 1);
+    }
+    if (configuration.hasSensorPMS2) {
+      measurements.update(Measurements::Temperature, utils::getInvalidTemperature(), 2);
+      measurements.update(Measurements::Humidity, utils::getInvalidHumidity(), 2);
+    }
+  }
+}
+
 /* Set max period for each measurement type based on sensor update interval*/
 void setMeasurementMaxPeriod() {
   int max;
 
-  /// Max period for S8 sensors measurements
+  /// Max period for CO2 measurements
   measurements.maxPeriod(Measurements::CO2, calculateMaxPeriod(SENSOR_CO2_UPDATE_INTERVAL));
 
   /// Max period for SGP sensors measurements
@@ -1697,4 +1803,3 @@ void newMeasurementCycle() {
     Serial.printf("Free heap: %u\n", ESP.getFreeHeap());
   }
 }
-
