@@ -860,8 +860,8 @@ static void oneIndoorInit(void) {
    * bar */
   if (ledBarButtonTest) {
     if (ag->button.getState() == ag->button.BUTTON_PRESSED) {
-      WiFi.begin("airgradient", "cleanair");
-      oledDisplay.setText("Configure WiFi", "connect to", "\'airgradient\'");
+      WiFi.begin("ag-diamond_2.4GHz", "0505563014466");
+      oledDisplay.setText("Configure WiFi", "connect to", "\'ag-diamond_2.4GHz\'");
       delay(2500);
       oledDisplay.setText("Rebooting...", "", "");
       delay(2500);
